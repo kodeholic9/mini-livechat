@@ -1,0 +1,30 @@
+[package]
+name = "mini-livechat"
+version = "0.1.0"
+edition = "2021"
+# author: kodeholic (powered by Gemini)
+
+[dependencies]
+# 비동기 I/O 및 워커 스레드 관리
+tokio = { version = "1", features = ["full"] }
+# Zero-copy 기반 패킷 복사 오버헤드 최소화
+bytes = "1"
+
+# 현장 디버깅 및 트레이스 로깅 시스템
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 웹소켓 시그널링 및 JSON 처리 (다음 스텝을 위한 미리 세팅)
+axum = { version = "0.8.8", features = ["ws"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 향후 SRTP 연동 시 주석 해제
+# webrtc-srtp = "0.11" 
+
+[profile.release]
+# 성능 영향: 클라우드 배포 시 LTO를 활성화하여 실행 속도를 극한으로 끌어올림
+lto = true
+codegen-units = 1
+# OOM 등 치명적 에러 발생 시 즉각 프로세스 종료 (빠른 장애 격리 및 재시작 유도)
+panic = "abort"
