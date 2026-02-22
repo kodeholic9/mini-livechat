@@ -18,6 +18,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = { version = "0.8.8", features = ["ws"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+futures-util = "0.3"
 
 # 향후 SRTP 연동 시 주석 해제
 # webrtc-srtp = "0.11" 

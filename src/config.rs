@@ -13,3 +13,6 @@ pub const EGRESS_QUEUE_SIZE: usize = 2048;
 
 /// 연결이 끊긴 좀비 세션을 정리하기 위한 타임아웃 (30초)
 pub const ZOMBIE_TIMEOUT_MS: u64 = 30_000;
+
+/// 웹소켓 시그널링 서버 TCP 포트
+pub const SIGNALING_PORT: u16 = 8080;
