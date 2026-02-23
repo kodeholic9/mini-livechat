@@ -22,3 +22,7 @@ pub const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
 
 /// 채팅 메시지 최대 길이 (bytes)
 pub const MAX_MESSAGE_LENGTH: usize = 2_000;
+
+/// IDENTIFY 토큰 검증용 Secret Key
+/// 운영 환경에서는 환경변수 LIVECHAT_SECRET 으로 오버라이드 할 것
+pub const DEFAULT_SECRET_KEY: &str = "changeme-secret";

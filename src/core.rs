@@ -8,11 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tracing::{trace, warn};
 
-use crate::config;
 use crate::error::{LiveError, LiveResult};
+use crate::media::srtp::SrtpContext;
 use crate::utils::current_timestamp;
-
-pub struct SrtpContext {}
 
 /// 브로드캐스트 송신자 타입 (직렬화된 GatewayPacket JSON)
 pub type BroadcastTx = mpsc::Sender<String>;
@@ -194,8 +192,8 @@ impl MediaPeer {
             channel_id,
             address:       Mutex::new(None),
             last_seen:     AtomicU64::new(current_timestamp()),
-            inbound_srtp:  Mutex::new(SrtpContext {}),
-            outbound_srtp: Mutex::new(SrtpContext {}),
+            inbound_srtp:  Mutex::new(SrtpContext::new()),
+            outbound_srtp: Mutex::new(SrtpContext::new()),
         }
     }
 

@@ -13,7 +13,11 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 // [테스트 헬퍼]
 // ----------------------------------------------------------------------------
 
+/// 테스트 전용 Secret Key — 환경변수로 서버와 동기화
+const TEST_SECRET: &str = "test-secret-key";
+
 async fn spawn_test_server() -> String {
+    std::env::set_var("LIVECHAT_SECRET", TEST_SECRET);
     let port = pick_unused_port().expect("사용 가능한 포트를 찾을 수 없습니다.");
     let addr = format!("127.0.0.1:{}", port);
 
@@ -72,7 +76,7 @@ fn assert_op(packet: &Value, expected_op: u64, label: &str) {
 /// HELLO → IDENTIFY → READY 까지 공통 처리
 async fn identify(tx: &mut WsTx, rx: &mut WsRx, user_id: &str) {
     recv(rx).await; // HELLO
-    send(tx, json!({ "op": 3, "d": { "user_id": user_id, "token": "tok" } })).await;
+    send(tx, json!({ "op": 3, "d": { "user_id": user_id, "token": TEST_SECRET } })).await;
     recv(rx).await; // READY
 }
 
@@ -97,7 +101,7 @@ async fn test_identify_flow() {
     assert_op(&hello, 0, "HELLO");
     assert!(hello["d"]["heartbeat_interval"].as_u64().unwrap() > 0);
 
-    send(&mut tx, json!({ "op": 3, "d": { "user_id": "user_1", "token": "tok" } })).await;
+    send(&mut tx, json!({ "op": 3, "d": { "user_id": "user_1", "token": TEST_SECRET } })).await;
 
     let ready = recv(&mut rx).await;
     assert_op(&ready, 4, "READY");

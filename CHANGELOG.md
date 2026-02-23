@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.4.0] - 2026-02-23
+
+### Added
+- `src/config.rs` — `DEFAULT_SECRET_KEY` 상수 추가
+- `src/protocol/protocol.rs` — IDENTIFY 토큰 검증 구현
+  - 환경변수 `LIVECHAT_SECRET` 우선, 없으면 `DEFAULT_SECRET_KEY` 폴백
+  - 불일치 시 `InvalidToken` (1001) 에러 반환
+
+### Changed
+- `tests/integration_test.rs` — `TEST_SECRET` 상수 추가, 모든 IDENTIFY 토큰을 환경변수와 동기화
+
+---
+
+## [0.3.0] - 2026-02-23
+
+### Added
+- `lib.rs` — `run_zombie_reaper()` 백그라운드 태스크 추가
+  - `HEARTBEAT_INTERVAL_MS` 주기로 순회
+  - heartbeat 없는 좀비 WS 세션 자동 제거 (`UserHub`)
+  - UDP 패킷 없는 좀비 MediaPeer 자동 제거 (`MediaPeerHub`)
+
+### Changed
+- `src/media/srtp.rs` — Phase 1 평문 패스스루로 확정, TODO 제거 및 Phase 2 계획 명시
+- `src/core.rs` — `SrtpContext {}` 직접 생성 → `SrtpContext::new()` 으로 통일
+- `Cargo.toml` — `webrtc-srtp`, `rcgen` 제거 (Phase 2에서 재추가 예정)
+- `lib.rs` — 허브 인스턴스를 `run_server()` 상단에서 생성 후 `Arc::clone` 으로 공유
+
+---
+
 ## [0.2.0] - 2026-02-23
 
 ### Added

@@ -165,8 +165,11 @@ async fn handle_identify(
     let payload = parse_payload::<IdentifyPayload>(packet.d)?;
     trace!("IDENTIFY - user_id: {}", payload.user_id);
 
-    // TODO: 실제 토큰 검증
-    if payload.token.is_empty() {
+    // Secret Key 검증 (환경변수 LIVECHAT_SECRET 우선, 없으면 DEFAULT_SECRET_KEY)
+    let expected = std::env::var("LIVECHAT_SECRET")
+        .unwrap_or_else(|_| config::DEFAULT_SECRET_KEY.to_string());
+    if payload.token != expected {
+        warn!("IDENTIFY 토큰 불일치 - user_id: {}", payload.user_id);
         return send(tx, error_packet(LiveError::InvalidToken)).await;
     }
 

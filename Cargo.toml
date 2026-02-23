@@ -20,8 +20,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures-util = "0.3"
 
-# 향후 SRTP 연동 시 주석 해제
-# webrtc-srtp = "0.11" 
+# SRTP 암복호화 — Phase 2에서 구현 예정 (현재 평문 패스스루)
+# webrtc-srtp = "0.17"
+# rcgen = "0.13"
 
 [dev-dependencies]
 # 통합 테스트용 WS 클라이언트

@@ -1,163 +1,125 @@
-# Mini LiveChat — 개발 스킬 노트
+# Mini LiveChat — Claude 작업 컨텍스트
 
-이 문서는 본 프로젝트를 유지보수하거나 확장할 때 참고할 핵심 패턴과 결정 배경을 기록합니다.
+이 파일은 새 대화에서 Claude가 프로젝트를 빠르게 파악하고 이어서 작업하기 위한 참조 파일입니다.
 
 ---
 
-## 1. 프로젝트 구조
+## 프로젝트 개요
+
+- **언어/프레임워크**: Rust + Tokio + Axum
+- **목적**: 무전(PTT) 및 실시간 미디어 릴레이 백엔드 서버
+- **경로**: `C:\work\github\mini-livechat`
+
+---
+
+## 현재 구현 상태
+
+### 완료
+- 디스코드 스타일 opcode 기반 WS 시그널링 프로토콜
+- `UserHub` / `ChannelHub` / `MediaPeerHub` 3계층 상태 관리
+- WS 송수신 분리 + mpsc 브로드캐스트 버스
+- UDP 릴레이 루프 + Symmetric RTP Latching (`media/net.rs`)
+- RTP 평문 패스스루 (`media/srtp.rs`) — Phase 1 확정
+- 좀비 세션/피어 자동 종료 태스크 (`run_zombie_reaper`)
+- IDENTIFY Secret Key 토큰 검증 (`LIVECHAT_SECRET` 환경변수)
+- 유닛 테스트 15개, 통합 테스트 7개
+
+### 미완료
+1. SRTP 암복호화 Phase 2 (앱: pre-shared key, 브라우저: DTLS-SRTP) — 클라이언트 준비 후
+
+---
+
+## 소스 구조
 
 ```
 src/
 ├── main.rs
-├── lib.rs              — run_server(), 모듈 선언
-├── config.rs           — 전역 상수 (포트, 타임아웃, 정원 등)
-├── error.rs            — LiveError enum, LiveResult<T>
-├── core.rs             — 상태 관리 3계층 (UserHub, ChannelHub, MediaPeerHub)
+├── lib.rs              — run_server(), mod 선언
+├── config.rs           — 전역 상수
+├── error.rs            — LiveError enum (1xxx~9xxx)
+├── core.rs             — UserHub, ChannelHub, MediaPeerHub
 ├── utils.rs            — current_timestamp()
-├── net.rs              — UDP 미디어 릴레이 (구현 예정)
-├── crypto.rs           — SRTP 암복호화 (구현 예정)
 │
-├── protocol.rs         — 서브모듈 선언 (mod.rs 대신 사용)
+├── media.rs            — pub use net::run_udp_relay
+└── media/
+    ├── net.rs          — UDP 수신 루프, RTP 파싱, 릴레이
+    └── srtp.rs         — SrtpContext (decrypt/encrypt)
+│
+├── protocol.rs         — 서브모듈 선언
 └── protocol/
-    ├── opcode.rs       — client / server opcode 상수
+    ├── opcode.rs       — client/server opcode 상수
     ├── error_code.rs   — u16 에러 코드 + LiveError 매핑
-    ├── message.rs      — GatewayPacket + payload 타입들
-    └── protocol.rs     — AppState, ws_handler, op 핸들러들
+    ├── message.rs      — GatewayPacket + payload 타입
+    └── protocol.rs     — AppState, ws_handler, op 핸들러
+
+tests/
+├── core_test.rs        — 유닛 테스트 (15개)
+└── integration_test.rs — WS 통합 테스트 (7개)
 ```
 
 ---
 
-## 2. 상태 관리 계층
+## 핵심 자료구조
 
-### UserHub
-- IDENTIFY 수신 시 등록, WS 종료 시 제거
-- `user_id → Arc<User>` 매핑
-- `User.tx: BroadcastTx` — 브로드캐스트 라우팅 테이블
-- `User.last_seen: AtomicU64` — 좀비 세션 감지용
-- `broadcast_to(user_ids, packet_json, exclude)` — 선택적 브로드캐스트
+```rust
+// 전역 라우팅 테이블 (IDENTIFY 시 등록)
+UserHub
+    users: RwLock<HashMap<user_id, Arc<User>>>
+        User { tx: BroadcastTx, last_seen: AtomicU64 }
 
-### ChannelHub
-- `channel_id → Arc<Channel>` 매핑
-- `Channel.members: RwLock<HashSet<user_id>>` — 채널 내 멤버 목록
-- `Channel.capacity` — 정원 제한
-- `Channel.created_at` — 확장성 고려 타임스탬프
+// 채널 멤버 관리
+ChannelHub
+    channels: RwLock<HashMap<channel_id, Arc<Channel>>>
+        Channel { channel_id, capacity, created_at, members: RwLock<HashSet<user_id>> }
 
-### MediaPeerHub
-- CHANNEL_JOIN 시 등록, CHANNEL_LEAVE / WS 종료 시 제거
-- `ssrc → Arc<MediaPeer>` 매핑 — O(1) 조회
-- `MediaPeer.user_id` — ssrc → user_id 역매핑
-- `MediaPeer.channel_id` — 릴레이 대상 채널
-- `MediaPeer.address` — UDP 패킷 출발지 주소 (Symmetric RTP Latching)
-- `MediaPeer.last_seen` — 좀비 피어 감지용
-- `get_channel_peers(channel_id)` — 미디어 릴레이 대상 목록
+// 미디어 핫패스 O(1) 조회
+MediaPeerHub
+    by_ssrc: RwLock<HashMap<ssrc, Arc<MediaPeer>>>
+        MediaPeer { ssrc, user_id, channel_id, address, last_seen,
+                    inbound_srtp: Mutex<SrtpContext>,
+                    outbound_srtp: Mutex<SrtpContext> }
+```
 
 ---
 
-## 3. 브로드캐스트 경로
+## 브로드캐스트 경로
 
 ```
 핸들러
-    → ChannelHub.get(channel_id).get_members()   // user_id HashSet
-    → UserHub.broadcast_to(members, json, exclude)
-        → users.read() 로 tx 일괄 수집
-        → tx.send(json) 비동기 전송
+    → ChannelHub.get(channel_id).get_members()     // HashSet<user_id>
+    → UserHub.broadcast_to(members, json, exclude) // tx.send()
 ```
 
-### WS 송수신 분리 패턴
-```rust
-let (mut ws_tx, mut ws_rx) = socket.split();
-let (broadcast_tx, mut broadcast_rx) = mpsc::channel(EGRESS_QUEUE_SIZE);
+## UDP 릴레이 경로
 
-// rx_loop: broadcast_rx → ws_tx (별도 태스크)
-tokio::spawn(async move {
-    while let Some(json) = broadcast_rx.recv().await {
-        ws_tx.send(Message::Text(json)).await;
-    }
-});
-
-// tx_loop: ws_rx → 핸들러 → broadcast_tx
-while let Some(msg) = ws_rx.next().await { ... }
+```
+recv_from()
+    → parse_ssrc() (offset 8, big-endian)
+    → MediaPeerHub.get(ssrc)
+    → peer.update_address(src_addr)        // Symmetric RTP Latching
+    → peer.inbound_srtp.decrypt(packet)    // TODO: 실제 구현
+    → get_channel_peers(channel_id) 순회
+    → target.outbound_srtp.encrypt()       // TODO: 실제 구현
+    → socket.send_to(encrypted, addr)
 ```
 
 ---
 
-## 4. 에러 처리 패턴
+## 코딩 규칙
 
-```rust
-// 핸들러에서 에러 발생 시
-return send(tx, error_packet(LiveError::ChannelFull(channel_id))).await;
-
-// error_packet 내부
-fn error_packet(err: LiveError) -> String {
-    make_packet(server::ERROR, ErrorPayload {
-        code:   to_error_code(&err),   // error_code.rs에서 u16 변환
-        reason: err.to_string(),
-    })
-}
-```
+- 파일 상단 `// author: kodeholic (powered by Claude)` 명시
+- 매직 넘버 금지 → `config.rs` 상수 사용
+- `unwrap()` 남용 금지 → `LiveResult<T>` 또는 로그 후 `continue`
+- 새 기능 추가 시 `CHANGELOG.md` 업데이트
 
 ---
 
-## 5. 미디어 릴레이 핫패스 (net.rs 구현 시 참고)
+## 자주 쓰는 명령
 
+```bash
+cargo build
+cargo test
+cargo test --test core_test
+cargo test --test integration_test
+RUST_LOG=trace cargo run
 ```
-UDP 패킷 수신
-    → RTP 헤더에서 ssrc 파싱
-    → MediaPeerHub.get(ssrc)           // O(1)
-    → peer.update_address(src_addr)    // Symmetric RTP Latching
-    → peer.touch()                     // last_seen 갱신
-    → SRTP 복호화 (inbound_srtp)
-    → MediaPeerHub.get_channel_peers(peer.channel_id)
-    → 각 peer.address로 SRTP 재암호화 후 UDP 전송
-```
-
----
-
-## 6. 좀비 감지 (구현 예정)
-
-```rust
-// 별도 tokio 태스크로 주기적 실행
-tokio::spawn(async move {
-    loop {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-
-        // WS 세션 좀비
-        for user_id in user_hub.find_zombies(ZOMBIE_TIMEOUT_MS) {
-            // cleanup 처리
-        }
-
-        // 미디어 피어 좀비
-        for ssrc in media_peer_hub.find_zombies(ZOMBIE_TIMEOUT_MS) {
-            media_peer_hub.remove(ssrc);
-        }
-    }
-});
-```
-
----
-
-## 7. 테스트 전략
-
-### 유닛 테스트 (`tests/core_test.rs`)
-- 자료구조 레벨 검증 (허브 등록/해제, 정원 초과, 중복 입장, 좀비 감지)
-- 동기 테스트로 빠른 피드백
-
-### 통합 테스트 (`tests/integration_test.rs`)
-- 랜덤 포트로 실제 서버 기동 (`portpicker`)
-- `tokio-tungstenite` WS 클라이언트로 실제 JSON 패킷 주고받기
-- 브로드캐스트 검증은 클라이언트 2개로 수행
-- 공통 헬퍼: `identify()`, `join_channel()` 로 시나리오 간결화
-
----
-
-## 8. 주요 의존성
-
-| 크레이트 | 용도 |
-|---|---|
-| tokio | 비동기 런타임 |
-| axum | HTTP/WebSocket 서버 |
-| serde / serde_json | 패킷 직렬화 |
-| futures-util | WS split, stream/sink |
-| tracing | 구조화 로깅 |
-| tokio-tungstenite | 테스트용 WS 클라이언트 |
-| portpicker | 테스트용 랜덤 포트 |
