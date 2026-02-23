@@ -23,6 +23,12 @@ futures-util = "0.3"
 # 향후 SRTP 연동 시 주석 해제
 # webrtc-srtp = "0.11" 
 
+[dev-dependencies]
+# 통합 테스트용 WS 클라이언트
+tokio-tungstenite = "0.26"
+# 랜덤 포트 바인딩용
+portpicker = "0.1"
+
 [profile.release]
 # 성능 영향: 클라우드 배포 시 LTO를 활성화하여 실행 속도를 극한으로 끌어올림
 lto = true

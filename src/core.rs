@@ -1,149 +1,256 @@
-// author: kodeholic (powered by Gemini)
+// author: kodeholic (powered by Claude)
 // 네트워크 로직과 철저히 분리된, 순수 비즈니스 상태 관리 모듈입니다.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use tracing::{trace, warn}; 
+use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::mpsc;
+use tracing::{trace, warn};
 
 use crate::config;
-use crate::utils::current_timestamp; 
 use crate::error::{LiveError, LiveResult};
+use crate::utils::current_timestamp;
 
 pub struct SrtpContext {}
 
+/// 브로드캐스트 송신자 타입 (직렬화된 GatewayPacket JSON)
+pub type BroadcastTx = mpsc::Sender<String>;
+
 // ----------------------------------------------------------------------------
-// [채널 상태] LiveChannel
+// [UserHub] WS 세션 관리 + 라우팅 테이블
+// IDENTIFY 시 등록, WS 종료 시 제거
 // ----------------------------------------------------------------------------
-pub struct LiveChannel {
-    pub channel_id: String,
-    pub active_peers: RwLock<HashMap<u32, Weak<LivePeer>>>,
-    pub current_speaker: AtomicU32,
-    pub last_activity: AtomicU64,
+
+pub struct User {
+    pub tx:        BroadcastTx,
+    pub last_seen: AtomicU64,   // 마지막 메시지 수신 시간 (좀비 세션 감지용)
 }
 
-impl LiveChannel {
-    pub fn new(channel_id: String) -> Self {
-        trace!("Creating new LiveChannel: {}", channel_id);
+impl User {
+    pub fn new(tx: BroadcastTx) -> Self {
         Self {
-            channel_id,
-            active_peers: RwLock::new(HashMap::new()),
-            current_speaker: AtomicU32::new(0),
-            last_activity: AtomicU64::new(current_timestamp()),
+            tx,
+            last_seen: AtomicU64::new(current_timestamp()),
         }
     }
 
-    pub fn add_peer(&self, ssrc: u32, weak_peer: Weak<LivePeer>) -> LiveResult<()> {
-        let mut peers = self.active_peers.write().unwrap();
-        
-        if peers.len() >= config::MAX_PEERS_PER_CHANNEL {
-            warn!("Capacity exceeded for channel {}. Cannot add peer {}", self.channel_id, ssrc);
+    pub fn touch(&self) {
+        self.last_seen.store(current_timestamp(), Ordering::Relaxed);
+    }
+}
+
+pub struct UserHub {
+    users: RwLock<HashMap<String, Arc<User>>>,
+}
+
+impl UserHub {
+    pub fn new() -> Self {
+        trace!("Initializing UserHub");
+        Self { users: RwLock::new(HashMap::new()) }
+    }
+
+    pub fn register(&self, user_id: &str, tx: BroadcastTx) -> Arc<User> {
+        let user = Arc::new(User::new(tx));
+        self.users.write().unwrap().insert(user_id.to_string(), Arc::clone(&user));
+        trace!("User registered: {}", user_id);
+        user
+    }
+
+    pub fn unregister(&self, user_id: &str) {
+        self.users.write().unwrap().remove(user_id);
+        trace!("User unregistered: {}", user_id);
+    }
+
+    pub fn get(&self, user_id: &str) -> Option<Arc<User>> {
+        self.users.read().unwrap().get(user_id).cloned()
+    }
+
+    /// user_id 목록을 받아 각각의 tx로 패킷 전송
+    /// exclude: 브로드캐스트에서 제외할 user_id (발신자 본인 등)
+    pub async fn broadcast_to(&self, user_ids: &HashSet<String>, packet_json: &str, exclude: Option<&str>) {
+        let txs: Vec<Arc<User>> = {
+            let users = self.users.read().unwrap();
+            user_ids.iter()
+                .filter(|uid| exclude.map_or(true, |ex| ex != uid.as_str()))
+                .filter_map(|uid| users.get(uid).cloned())
+                .collect()
+        };
+
+        for user in txs {
+            if user.tx.send(packet_json.to_string()).await.is_err() {
+                warn!("Broadcast failed: rx closed");
+            }
+        }
+    }
+
+    /// 좀비 세션 목록 반환 (last_seen 기준)
+    pub fn find_zombies(&self, timeout_ms: u64) -> Vec<String> {
+        let now = current_timestamp();
+        self.users.read().unwrap()
+            .iter()
+            .filter(|(_, u)| now.saturating_sub(u.last_seen.load(Ordering::Relaxed)) >= timeout_ms)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+}
+
+// ----------------------------------------------------------------------------
+// [ChannelHub] 채널 정의 + 멤버 목록 관리
+// ----------------------------------------------------------------------------
+
+pub struct Channel {
+    pub channel_id: String,
+    pub capacity:   usize,
+    pub created_at: u64,
+    pub members:    RwLock<HashSet<String>>,    // user_id
+}
+
+impl Channel {
+    pub fn new(channel_id: String, capacity: usize) -> Self {
+        trace!("Creating Channel: {}", channel_id);
+        Self {
+            channel_id,
+            capacity,
+            created_at: current_timestamp(),
+            members:    RwLock::new(HashSet::new()),
+        }
+    }
+
+    pub fn add_member(&self, user_id: &str) -> LiveResult<()> {
+        let mut members = self.members.write().unwrap();
+        if members.len() >= self.capacity {
+            warn!("Channel {} is full", self.channel_id);
             return Err(LiveError::ChannelFull(self.channel_id.clone()));
         }
-        
-        peers.insert(ssrc, weak_peer);
-        trace!("Peer {} successfully joined channel {}", ssrc, self.channel_id);
+        if !members.insert(user_id.to_string()) {
+            return Err(LiveError::AlreadyInChannel(self.channel_id.clone()));
+        }
+        trace!("Member {} joined Channel {}", user_id, self.channel_id);
         Ok(())
     }
 
-    pub fn remove_peer(&self, ssrc: u32) {
-        let mut peers = self.active_peers.write().unwrap();
-        peers.remove(&ssrc);
-        trace!("Peer {} removed from channel {}", ssrc, self.channel_id);
-        
-        if self.current_speaker.load(Ordering::Relaxed) == ssrc {
-            self.current_speaker.store(0, Ordering::Relaxed);
-            trace!("Speaker {} left channel {}, microphone reset", ssrc, self.channel_id);
-        }
+    pub fn remove_member(&self, user_id: &str) {
+        self.members.write().unwrap().remove(user_id);
+        trace!("Member {} left Channel {}", user_id, self.channel_id);
+    }
+
+    pub fn get_members(&self) -> HashSet<String> {
+        self.members.read().unwrap().clone()
+    }
+
+    pub fn member_count(&self) -> usize {
+        self.members.read().unwrap().len()
     }
 }
 
-// ----------------------------------------------------------------------------
-// [유저 상태] LivePeer
-// ----------------------------------------------------------------------------
-pub struct LivePeer {
-    pub member_id: String,
-    pub ssrc: u32,
-    pub live_channel: Arc<LiveChannel>,
-    pub address: Mutex<Option<SocketAddr>>,
-    pub inbound_srtp: Mutex<SrtpContext>,
-    pub outbound_srtp: Mutex<SrtpContext>,
-    pub last_activity: AtomicU64,
+pub struct ChannelHub {
+    pub channels: RwLock<HashMap<String, Arc<Channel>>>,
 }
 
-impl LivePeer {
-    pub fn new(member_id: String, ssrc: u32, channel: Arc<LiveChannel>) -> Self {
-        trace!("Initializing new LivePeer [Member: {}, SSRC: {}]", member_id, ssrc);
-        Self {
-            member_id,
-            ssrc,
-            live_channel: channel,
-            address: Mutex::new(None),
-            inbound_srtp: Mutex::new(SrtpContext {}),
-            outbound_srtp: Mutex::new(SrtpContext {}),
-            last_activity: AtomicU64::new(current_timestamp()),
-        }
-    }
-}
-
-// ----------------------------------------------------------------------------
-// [글로벌 허브] 라우팅 테이블
-// ----------------------------------------------------------------------------
-pub struct LiveChannelHub {
-    pub channels: RwLock<HashMap<String, Arc<LiveChannel>>>,
-}
-
-impl LiveChannelHub {
+impl ChannelHub {
     pub fn new() -> Self {
-        trace!("Initializing LiveChannelHub");
+        trace!("Initializing ChannelHub");
         Self { channels: RwLock::new(HashMap::new()) }
     }
 
-    pub fn get_or_create(&self, channel_id: &str) -> Arc<LiveChannel> {
-        if let Some(channel) = self.channels.read().unwrap().get(channel_id) {
-            trace!("Channel {} found via read-lock", channel_id);
-            return Arc::clone(channel);
-        }
-
+    pub fn create(&self, channel_id: &str, capacity: usize) -> Arc<Channel> {
         let mut channels = self.channels.write().unwrap();
-        let channel = channels.entry(channel_id.to_string()).or_insert_with(|| {
-            trace!("Channel {} not found, creating new channel via write-lock", channel_id);
-            Arc::new(LiveChannel::new(channel_id.to_string()))
+        let ch = channels.entry(channel_id.to_string()).or_insert_with(|| {
+            Arc::new(Channel::new(channel_id.to_string(), capacity))
         });
-        
-        Arc::clone(channel)
+        Arc::clone(ch)
+    }
+
+    pub fn get(&self, channel_id: &str) -> Option<Arc<Channel>> {
+        self.channels.read().unwrap().get(channel_id).cloned()
+    }
+
+    pub fn remove(&self, channel_id: &str) -> bool {
+        self.channels.write().unwrap().remove(channel_id).is_some()
     }
 }
 
-pub struct LivePeerHub {
-    pub peers: RwLock<HashMap<u32, Arc<LivePeer>>>,
+// ----------------------------------------------------------------------------
+// [MediaPeerHub] 미디어 릴레이 핫패스 전용 (ssrc 기반 O(1) 조회)
+// ----------------------------------------------------------------------------
+
+pub struct MediaPeer {
+    pub ssrc:          u32,
+    pub user_id:       String,      // ssrc → user_id 역매핑
+    pub channel_id:    String,      // 릴레이 대상 채널 식별
+    pub address:       Mutex<Option<SocketAddr>>,
+    pub last_seen:     AtomicU64,   // UDP 패킷 마지막 수신 시간 (좀비 피어 감지용)
+    pub inbound_srtp:  Mutex<SrtpContext>,
+    pub outbound_srtp: Mutex<SrtpContext>,
 }
 
-impl LivePeerHub {
+impl MediaPeer {
+    pub fn new(ssrc: u32, user_id: String, channel_id: String) -> Self {
+        trace!("Initializing MediaPeer [user: {}, ssrc: {}]", user_id, ssrc);
+        Self {
+            ssrc,
+            user_id,
+            channel_id,
+            address:       Mutex::new(None),
+            last_seen:     AtomicU64::new(current_timestamp()),
+            inbound_srtp:  Mutex::new(SrtpContext {}),
+            outbound_srtp: Mutex::new(SrtpContext {}),
+        }
+    }
+
+    pub fn touch(&self) {
+        self.last_seen.store(current_timestamp(), Ordering::Relaxed);
+    }
+
+    pub fn update_address(&self, addr: SocketAddr) {
+        *self.address.lock().unwrap() = Some(addr);
+        self.touch();
+    }
+}
+
+pub struct MediaPeerHub {
+    pub by_ssrc: RwLock<HashMap<u32, Arc<MediaPeer>>>,
+}
+
+impl MediaPeerHub {
     pub fn new() -> Self {
-        trace!("Initializing LivePeerHub");
-        Self { peers: RwLock::new(HashMap::new()) }
+        trace!("Initializing MediaPeerHub");
+        Self { by_ssrc: RwLock::new(HashMap::new()) }
     }
 
-    pub fn join_channel(
-        &self, 
-        member_id: &str,
-        ssrc: u32, 
-        channel_id: &str, 
-        channel_hub: &LiveChannelHub
-    ) -> LiveResult<Arc<LivePeer>> {
-        
-        trace!("Join request: Member {} (SSRC {}) to channel {}", member_id, ssrc, channel_id);
+    pub fn insert(&self, ssrc: u32, user_id: &str, channel_id: &str) -> Arc<MediaPeer> {
+        let peer = Arc::new(MediaPeer::new(ssrc, user_id.to_string(), channel_id.to_string()));
+        self.by_ssrc.write().unwrap().insert(ssrc, Arc::clone(&peer));
+        trace!("MediaPeer inserted: ssrc={} user={} channel={}", ssrc, user_id, channel_id);
+        peer
+    }
 
-        let channel = channel_hub.get_or_create(channel_id);
-        let peer = Arc::new(LivePeer::new(member_id.to_string(), ssrc, Arc::clone(&channel)));
+    pub fn get(&self, ssrc: u32) -> Option<Arc<MediaPeer>> {
+        self.by_ssrc.read().unwrap().get(&ssrc).cloned()
+    }
 
-        channel.add_peer(ssrc, Arc::downgrade(&peer))?;
+    pub fn remove(&self, ssrc: u32) {
+        self.by_ssrc.write().unwrap().remove(&ssrc);
+        trace!("MediaPeer removed: ssrc={}", ssrc);
+    }
 
-        self.peers.write().unwrap().insert(ssrc, Arc::clone(&peer));
+    /// 채널 내 모든 MediaPeer 반환 (릴레이 대상 목록)
+    pub fn get_channel_peers(&self, channel_id: &str) -> Vec<Arc<MediaPeer>> {
+        self.by_ssrc.read().unwrap()
+            .values()
+            .filter(|p| p.channel_id == channel_id)
+            .cloned()
+            .collect()
+    }
 
-        trace!("Member {} (SSRC {}) successfully registered", member_id, ssrc);
-        Ok(peer)
+    /// 좀비 피어 목록 반환
+    pub fn find_zombies(&self, timeout_ms: u64) -> Vec<u32> {
+        let now = current_timestamp();
+        self.by_ssrc.read().unwrap()
+            .iter()
+            .filter(|(_, p)| now.saturating_sub(p.last_seen.load(Ordering::Relaxed)) >= timeout_ms)
+            .map(|(ssrc, _)| *ssrc)
+            .collect()
     }
 }

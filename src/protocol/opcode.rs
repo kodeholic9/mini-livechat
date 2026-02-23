@@ -1,0 +1,43 @@
+// author: kodeholic (powered by Claude)
+
+/// Client → Server opcodes
+pub mod client {
+    /// 클라이언트가 살아있음을 알림. d: 마지막 수신한 sequence 번호
+    pub const HEARTBEAT:      u8 = 1;
+    /// 연결 직후 인증 (user_id, token)
+    pub const IDENTIFY:       u8 = 3;
+
+    /// 채널 생성
+    pub const CHANNEL_CREATE: u8 = 10;
+    /// 채널 참여
+    pub const CHANNEL_JOIN:   u8 = 11;
+    /// 채널 나가기
+    pub const CHANNEL_LEAVE:  u8 = 12;
+    /// 채널 정보 수정
+    pub const CHANNEL_UPDATE: u8 = 13;
+    /// 채널 삭제
+    pub const CHANNEL_DELETE: u8 = 14;
+
+    /// 채팅 메시지 전송
+    pub const MESSAGE_CREATE: u8 = 20;
+}
+
+/// Server → Client opcodes
+pub mod server {
+    /// 연결 직후 서버가 heartbeat 주기를 알려줌
+    pub const HELLO:           u8 = 0;
+    /// HEARTBEAT 수신 확인
+    pub const HEARTBEAT_ACK:   u8 = 2;
+    /// IDENTIFY 성공. 세션 정보 전달
+    pub const READY:           u8 = 4;
+
+    /// 채널 내 멤버 변경 이벤트 브로드캐스트 (join/leave/update)
+    pub const CHANNEL_EVENT:   u8 = 100;
+    /// 채팅 메시지 브로드캐스트
+    pub const MESSAGE_EVENT:   u8 = 101;
+
+    /// 요청 성공 응답
+    pub const ACK:             u8 = 200;
+    /// 에러 응답
+    pub const ERROR:           u8 = 201;
+}
