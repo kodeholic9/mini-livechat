@@ -8,43 +8,48 @@ All notable changes to this project will be documented in this file.
 
 **조사 완료 내용** (2026-02-24)
 
-- `dtls-0.17.1` (`~/.cargo/registry`) — `conn/mod.rs` pub fn 목록 확인 결과
-  `export_keying_material()` **없음** (read/write/close/connection_state/selected_srtpprotection_profile 만 존재)
+**정규 파이프라인 확인:**
+```
+dtls::state::State  →  KeyingMaterialExporter 트레이트 구현
+         ↓
+webrtc-srtp::config::Config::extract_session_keys_from_dtls(state, is_client)
+         ↓
+srtp::context::Context::new(local_key, local_salt, profile, ...)
+```
+- `webrtc-rs/rtc/rtc-srtp/src/config.rs` 에 `extract_session_keys_from_dtls()` 공식 API 존재 확인 ✅
+- `dtls::state::State` 가 `KeyingMaterialExporter` 트레이트 구현 확인 ✅
+- **문제**: 현재 `do_handshake()` 는 `DTLSConn` 만 들고 있고, `DTLSConn.state` 가 `pub(crate)` 라 외부 접근 불가
 
-- `webrtc-rs/rtc` 서브모듈 (`C:\work\github\webrtc\rtc\rtc-dtls`) 동일하게 **없음**
+**확정된 전략: `dtls` 버전 업그레이드 (포크 없음)**
+- `webrtc-dtls 0.6.x` 이상부터 `export_keying_material()` 공개 API 추가 여부 확인 필요
+- 포크/아키텍처 전환 없이 `Cargo.toml` 버전만 올리는 정규 방법
 
-- 단, `rtc-dtls/src/prf/mod.rs` 에 필요한 재료 확인:
-  - `EncryptionKeys { master_secret, client_write_key, server_write_key, client_write_iv, server_write_iv }` 구조체 존재
-  - `prf_p_hash()` 함수 존재 (현재 `pub(crate)` — 외부 노출 필요)
-  - RFC 5705 기준 export_keying_material = `prf_p_hash(master_secret, label+client_random+server_random, len)` 로 직접 구현 가능
-
-**확정된 구현 전략**: `rtc-dtls` 포크 후 패치
-  1. `prf_p_hash()` — `pub(crate)` → `pub` 노출
-  2. `DTLSConn::export_keying_material()` 메서드 추가
-  3. `Cargo.toml` `[patch.crates-io]` 섹션에 로컬 path 지정
-  4. `do_handshake()` 내 TODO 블록을 실제 호출로 교체
+**⚠️ 롤백 완료 (2026-02-24)**
+- `rtc-dtls/src/conn/mod.rs` 에 잘못 추가한 `export_keying_material()` 패치 롤백 ✅
+- `[patch.crates-io]` 설정 추가 없음 (미진행) ✅
 
 **다음 세션 작업 순서**:
 
-  STEP 1. `src/media/dtls.rs` 크레이트 전환
-  - `dtls = "0.17.1"` (구 계열) → `rtc-dtls` (webrtc-rs/rtc 계열) 로 교체
-  - `webrtc_util::Conn` → `rtc-dtls` 대응 트레이트로 교체
-  - import 경로 일괄 수정 (`dtls::` → `rtc_dtls::`)
+  STEP 1. `webrtc-dtls` 최신 버전 API 확인
+  - `webrtc-dtls 0.6.x` ~ `0.7.x` 의 `DTLSConn` pub fn 목록에서
+    `export_keying_material()` 존재 여부 확인
+  - 확인 방법: `cargo doc` 또는 crates.io 문서
 
-  STEP 2. `rtc-dtls` 패치 적용 확인
-  - `C:\work\github\webrtc\rtc\rtc-dtls\src\conn\mod.rs` 에
-    `export_keying_material()` 및 `selected_srtp_protection_profile()` 이미 추가됨 ✅
-  - `Cargo.toml` `[patch.crates-io]` 섹션 추가:
-    ```toml
-    [patch.crates-io]
-    rtc-dtls = { path = "../webrtc/rtc/rtc-dtls" }
-    ```
+  STEP 2. `Cargo.toml` 버전 업
+  - `dtls = "0.17.1"` → 확인된 버전으로 변경
+  - `webrtc-srtp` 도 동일 계열 버전으로 맞춤
 
-  STEP 3. `do_handshake()` TODO 블록 실제 구현으로 교체
+  STEP 3. `do_handshake()` TODO 블록 실제 구현
   - `dtls_conn.export_keying_material(SRTP_MASTER_KEY_LABEL, &[], KEY_MATERIAL_LEN)`
-  - 키 슬라이싱 → `init_srtp_contexts(endpoint, ...)` 호출
+  - `webrtc_srtp::config::Config::extract_session_keys_from_dtls()` 호출
+  - `srtp::context::Context::new()` 로 컨텍스트 생성 → endpoint 에 설치
 
-  STEP 4. `cargo build` 확인 후 CHANGELOG [0.8.0] 작성
+  STEP 4. `cargo build` 확인 (부장님이 직접 실행 후 에러 붙여넣기)
+  ```bash
+  cd C:\work\github\mini-livechat && cargo build 2>&1
+  ```
+
+  STEP 5. 빌드 성공 후 CHANGELOG [0.8.0] 작성
 
 ---
 
