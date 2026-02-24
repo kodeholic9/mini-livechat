@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## [TODO] DTLS-SRTP 키 도출 — 구현 전략 확정, 코딩 미완성
+## [TODO] DTLS-SRTP 키 도출 — 다음 세션 시작점
 
 **조사 완료 내용** (2026-02-24)
 
@@ -24,7 +24,27 @@ All notable changes to this project will be documented in this file.
   3. `Cargo.toml` `[patch.crates-io]` 섹션에 로컬 path 지정
   4. `do_handshake()` 내 TODO 블록을 실제 호출로 교체
 
-**다음 작업**: `state.rs` 확인 후 포크 작업 시작
+**다음 세션 작업 순서**:
+
+  STEP 1. `src/media/dtls.rs` 크레이트 전환
+  - `dtls = "0.17.1"` (구 계열) → `rtc-dtls` (webrtc-rs/rtc 계열) 로 교체
+  - `webrtc_util::Conn` → `rtc-dtls` 대응 트레이트로 교체
+  - import 경로 일괄 수정 (`dtls::` → `rtc_dtls::`)
+
+  STEP 2. `rtc-dtls` 패치 적용 확인
+  - `C:\work\github\webrtc\rtc\rtc-dtls\src\conn\mod.rs` 에
+    `export_keying_material()` 및 `selected_srtp_protection_profile()` 이미 추가됨 ✅
+  - `Cargo.toml` `[patch.crates-io]` 섹션 추가:
+    ```toml
+    [patch.crates-io]
+    rtc-dtls = { path = "../webrtc/rtc/rtc-dtls" }
+    ```
+
+  STEP 3. `do_handshake()` TODO 블록 실제 구현으로 교체
+  - `dtls_conn.export_keying_material(SRTP_MASTER_KEY_LABEL, &[], KEY_MATERIAL_LEN)`
+  - 키 슬라이싱 → `init_srtp_contexts(endpoint, ...)` 호출
+
+  STEP 4. `cargo build` 확인 후 CHANGELOG [0.8.0] 작성
 
 ---
 
