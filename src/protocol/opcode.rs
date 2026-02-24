@@ -17,6 +17,10 @@ pub mod client {
     pub const CHANNEL_UPDATE: u8 = 13;
     /// 채널 삭제
     pub const CHANNEL_DELETE: u8 = 14;
+    /// 채널 목록 조회
+    pub const CHANNEL_LIST:   u8 = 15;
+    /// 채널 상세 조회 (채널 정보 + peer 목록)
+    pub const CHANNEL_INFO:   u8 = 16;
 
     /// 채팅 메시지 전송
     pub const MESSAGE_CREATE: u8 = 20;

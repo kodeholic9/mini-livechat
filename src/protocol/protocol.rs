@@ -16,9 +16,9 @@ use crate::protocol::{
     error_code::to_error_code,
     message::{
         AckPayload, ChannelCreatePayload, ChannelDeletePayload, ChannelEventPayload,
-        ChannelJoinAckData, ChannelJoinPayload, ChannelLeavePayload, ChannelUpdatePayload,
-        ErrorPayload, GatewayPacket, HelloPayload, IdentifyPayload, MemberInfo,
-        MessageCreatePayload, MessageEventPayload, ReadyPayload,
+        ChannelInfoData, ChannelJoinAckData, ChannelJoinPayload, ChannelLeavePayload,
+        ChannelSummary, ChannelUpdatePayload, ErrorPayload, GatewayPacket, HelloPayload,
+        IdentifyPayload, MemberInfo, MessageCreatePayload, MessageEventPayload, ReadyPayload,
     },
     opcode::{client, server},
 };
@@ -51,11 +51,12 @@ struct Session {
     user_id:         Option<String>,
     current_channel: Option<String>,
     current_ssrc:    Option<u32>,
+    current_ufrag:   Option<String>,  // MediaPeerHub 제거용
 }
 
 impl Session {
     fn new() -> Self {
-        Self { user_id: None, current_channel: None, current_ssrc: None }
+        Self { user_id: None, current_channel: None, current_ssrc: None, current_ufrag: None }
     }
 
     fn is_authenticated(&self) -> bool {
@@ -131,6 +132,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             client::CHANNEL_LEAVE  => handle_channel_leave(&broadcast_tx, &mut session, &state, packet).await,
             client::CHANNEL_UPDATE => handle_channel_update(&broadcast_tx, &state, packet).await,
             client::CHANNEL_DELETE => handle_channel_delete(&broadcast_tx, &state, packet).await,
+            client::CHANNEL_LIST   => handle_channel_list(&broadcast_tx, &state).await,
+            client::CHANNEL_INFO   => handle_channel_info(&broadcast_tx, &state, packet).await,
             client::MESSAGE_CREATE => handle_message_create(&broadcast_tx, &session, &state, packet).await,
             unknown => {
                 warn!("알 수 없는 opcode: {}", unknown);
@@ -216,11 +219,13 @@ async fn handle_channel_join(
         .ok_or_else(|| LiveError::ChannelNotFound(payload.channel_id.clone()))?;
     channel.add_member(&user_id)?;
 
-    // 2. MediaPeer 등록 (미디어 릴레이 핫패스용)
-    state.media_peer_hub.insert(payload.ssrc, &user_id, &payload.channel_id);
+    // 2. Endpoint 등록 (ufrag 주키, ssrc는 Track 메타데이터)
+    let ep = state.media_peer_hub.insert(&payload.ufrag, &user_id, &payload.channel_id);
+    ep.add_track(payload.ssrc, crate::core::TrackKind::Audio);
 
     session.current_channel = Some(payload.channel_id.clone());
     session.current_ssrc    = Some(payload.ssrc);
+    session.current_ufrag   = Some(payload.ufrag.clone());
 
     // 3. 본인에게 ACK (현재 채널 멤버 목록 포함)
     let active_members = collect_members(&payload.channel_id, state);
@@ -258,7 +263,8 @@ async fn handle_channel_leave(
         return send(tx, error_packet(LiveError::NotInChannel(payload.channel_id))).await;
     }
 
-    let ssrc = session.current_ssrc.unwrap();
+    let ssrc  = session.current_ssrc.unwrap();
+    let ufrag = session.current_ufrag.clone().unwrap_or_default();
 
     // 1. 퇴장 이벤트 브로드캐스트 (remove 전에)
     if let Some(channel) = state.channel_hub.get(&payload.channel_id) {
@@ -272,11 +278,12 @@ async fn handle_channel_leave(
         channel.remove_member(&user_id);
     }
 
-    // 2. MediaPeer 제거
-    state.media_peer_hub.remove(ssrc);
+    // 2. Endpoint 제거
+    state.media_peer_hub.remove(&ufrag);
 
     session.current_channel = None;
     session.current_ssrc    = None;
+    session.current_ufrag   = None;
 
     send(tx, make_packet(server::ACK, AckPayload {
         op:   client::CHANNEL_LEAVE,
@@ -339,6 +346,59 @@ async fn handle_channel_delete(
     send(tx, make_packet(server::ACK, AckPayload {
         op:   client::CHANNEL_DELETE,
         data: serde_json::json!({ "channel_id": payload.channel_id }),
+    })).await
+}
+
+async fn handle_channel_list(
+    tx:    &mpsc::Sender<String>,
+    state: &AppState,
+) -> Result<(), LiveError> {
+    trace!("CHANNEL_LIST 요청");
+
+    let list: Vec<ChannelSummary> = {
+        let channels = state.channel_hub.channels.read().unwrap();
+        channels.values()
+            .map(|ch| ChannelSummary {
+                channel_id:   ch.channel_id.clone(),
+                member_count: ch.member_count(),
+                capacity:     ch.capacity,
+                created_at:   ch.created_at,
+            })
+            .collect()
+    };
+
+    send(tx, make_packet(server::ACK, AckPayload {
+        op:   client::CHANNEL_LIST,
+        data: serde_json::to_value(list).unwrap_or_default(),
+    })).await
+}
+
+async fn handle_channel_info(
+    tx:     &mpsc::Sender<String>,
+    state:  &AppState,
+    packet: GatewayPacket,
+) -> Result<(), LiveError> {
+    // d: { "channel_id": "CH_001" }
+    let channel_id = packet.d
+        .as_ref()
+        .and_then(|d| d["channel_id"].as_str())
+        .ok_or_else(|| LiveError::InvalidPayload("channel_id 필수".to_string()))?;
+    trace!("CHANNEL_INFO - channel:{}", channel_id);
+
+    let channel = state.channel_hub.get(channel_id)
+        .ok_or_else(|| LiveError::ChannelNotFound(channel_id.to_string()))?;
+
+    let peers = collect_members(channel_id, state);
+
+    send(tx, make_packet(server::ACK, AckPayload {
+        op:   client::CHANNEL_INFO,
+        data: serde_json::to_value(ChannelInfoData {
+            channel_id:   channel.channel_id.clone(),
+            member_count: channel.member_count(),
+            capacity:     channel.capacity,
+            created_at:   channel.created_at,
+            peers,
+        }).unwrap_or_default(),
     })).await
 }
 
@@ -411,20 +471,18 @@ async fn send(tx: &mpsc::Sender<String>, json: String) -> Result<(), LiveError> 
     tx.send(json).await.map_err(|e| LiveError::InternalError(e.to_string()))
 }
 
-/// 채널 멤버 목록을 MemberInfo로 변환 (ssrc는 MediaPeerHub에서 역조회)
+/// 채널 멤버 목록을 MemberInfo로 변환
+/// ssrc는 Endpoint.tracks에서 첫 번째 audio 트랙으로 제공
 fn collect_members(channel_id: &str, state: &AppState) -> Vec<MemberInfo> {
-    let channel = match state.channel_hub.get(channel_id) {
-        Some(ch) => ch,
-        None     => return vec![],
-    };
-
-    let peers = state.media_peer_hub.by_ssrc.read().unwrap();
-
-    channel.get_members().iter()
-        .filter_map(|uid| {
-            peers.values()
-                .find(|p| p.user_id == *uid && p.channel_id == channel_id)
-                .map(|p| MemberInfo { user_id: uid.clone(), ssrc: p.ssrc })
+    state.media_peer_hub
+        .get_channel_endpoints(channel_id)
+        .into_iter()
+        .map(|ep| {
+            let ssrc = ep.tracks.read().unwrap()
+                .first()
+                .map(|t| t.ssrc)
+                .unwrap_or(0);
+            MemberInfo { user_id: ep.user_id.clone(), ssrc }
         })
         .collect()
 }
@@ -436,8 +494,12 @@ async fn cleanup(session: &mut Session, state: &AppState) {
         None      => return,
     };
 
-    if let (Some(channel_id), Some(ssrc)) = (session.current_channel.take(), session.current_ssrc.take()) {
-        trace!("cleanup - user:{} channel:{} ssrc:{}", user_id, channel_id, ssrc);
+    if let (Some(channel_id), Some(ssrc), Some(ufrag)) = (
+        session.current_channel.take(),
+        session.current_ssrc.take(),
+        session.current_ufrag.take(),
+    ) {
+        trace!("cleanup - user:{} channel:{} ufrag:{}", user_id, channel_id, ufrag);
 
         if let Some(channel) = state.channel_hub.get(&channel_id) {
             let members    = channel.get_members();
@@ -450,7 +512,7 @@ async fn cleanup(session: &mut Session, state: &AppState) {
             channel.remove_member(&user_id);
         }
 
-        state.media_peer_hub.remove(ssrc);
+        state.media_peer_hub.remove(&ufrag);
     }
 
     state.user_hub.unregister(&user_id);

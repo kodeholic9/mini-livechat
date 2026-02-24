@@ -24,6 +24,16 @@ futures-util = "0.3"
 # webrtc-srtp = "0.17"
 # rcgen = "0.13"
 
+# Phase 2 — ICE Lite + DTLS-SRTP
+webrtc-sdp  = "0.3.13"
+stun        = "0.17.1"
+dtls        = "0.17.1"
+webrtc-srtp = "0.17.1"
+webrtc-util = "0.17.1"
+sha2               = "0.10"
+rustls-pki-types   = "1"
+async-trait = "0.1"
+
 [dev-dependencies]
 # 통합 테스트용 WS 클라이언트
 tokio-tungstenite = "0.26"

@@ -1,39 +1,53 @@
 // author: kodeholic (powered by Claude)
-// RTP 미디어 패킷 처리 모듈
+// SRTP 컨텍스트 모듈
 //
-// [현재 상태] Phase 1: 평문 패스스루
-//   - 암복호화 없이 수신 패킷을 그대로 반환합니다.
-//   - 내부망 / 개발 환경 용도로 사용합니다.
-//
-// [Phase 2 예정] SRTP 암복호화
-//   - 앱 클라이언트: WS 시그널링으로 pre-shared key 교환 후 AES-128-CTR
-//   - 브라우저 클라이언트: DTLS-SRTP (별도 구현 필요)
-//
-// 흐름:
-//   수신 패킷 → decrypt() → plaintext RTP
-//   plaintext RTP → encrypt() → 송신 패킷
+// [Phase 2.1] 키 설치 구조만 구현, 실제 암복호화는 패스스루
+// [Phase 2.2] webrtc-srtp Session 기반 실제 암복호화 구현 예정
 
-/// RTP/SRTP 세션 컨텍스트
-/// 피어마다 inbound / outbound 각각 보유합니다.
-///
-/// Phase 2에서 아래 필드가 추가됩니다:
-///   master_key:  [u8; 16]
-///   master_salt: [u8; 14]
-pub struct SrtpContext;
+use tracing::debug;
+use crate::core::Endpoint;
+
+// ============================================================================
+// [SrtpContext]
+// Endpoint당 inbound / outbound 각각 1개
+// ============================================================================
+
+pub struct SrtpContext {
+    key_material: Option<KeyMaterial>,
+}
+
+#[derive(Clone)]
+pub struct KeyMaterial {
+    pub master_key:  Vec<u8>,
+    pub master_salt: Vec<u8>,
+}
 
 impl SrtpContext {
     pub fn new() -> Self {
-        Self
+        Self { key_material: None }
     }
 
-    /// 수신 패킷 복호화 → plaintext RTP 반환
-    /// Phase 1: 패스스루 (그대로 반환)
+    /// DTLS 핸드셰이크 완료 후 키 설치
+    pub fn install_key(&mut self, key: &[u8], salt: &[u8]) {
+        self.key_material = Some(KeyMaterial {
+            master_key:  key.to_vec(),
+            master_salt: salt.to_vec(),
+        });
+        debug!("[srtp] key installed key_len={} salt_len={}", key.len(), salt.len());
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.key_material.is_some()
+    }
+
+    /// 수신 패킷 복호화
+    /// Phase 2.1: 패스스루 (키 설치 여부와 무관)
+    /// Phase 2.2: webrtc-srtp 실제 복호화
     pub fn decrypt<'a>(&self, packet: &'a [u8]) -> Result<&'a [u8], SrtpError> {
         Ok(packet)
     }
 
-    /// plaintext RTP 암호화 → 송신 패킷 반환
-    /// Phase 1: 패스스루 (그대로 반환)
+    /// plaintext RTP 암호화
     pub fn encrypt<'a>(&self, packet: &'a [u8]) -> Result<&'a [u8], SrtpError> {
         Ok(packet)
     }
@@ -45,49 +59,91 @@ impl Default for SrtpContext {
     }
 }
 
-/// RTP/SRTP 처리 에러
+// ============================================================================
+// [init_srtp_contexts]
+// dtls.rs에서 DTLS 핸드셰이크 완료 시 호출
+//
+// key material 레이아웃 (RFC 5764, AES_CM_128_HMAC_SHA1_80):
+//   inbound  키 = client_write_key/salt (브라우저→서버)
+//   outbound 키 = server_write_key/salt (서버→브라우저)
+// ============================================================================
+
+pub fn init_srtp_contexts(
+    endpoint:    &Endpoint,
+    client_key:  &[u8],
+    client_salt: &[u8],
+    server_key:  &[u8],
+    server_salt: &[u8],
+) -> Result<(), SrtpError> {
+    {
+        let mut inbound = endpoint.inbound_srtp.lock().unwrap();
+        inbound.install_key(client_key, client_salt);
+    }
+    {
+        let mut outbound = endpoint.outbound_srtp.lock().unwrap();
+        outbound.install_key(server_key, server_salt);
+    }
+    Ok(())
+}
+
+// ============================================================================
+// [SrtpError]
+// ============================================================================
+
 #[derive(Debug)]
 pub enum SrtpError {
     DecryptFailed(String),
     EncryptFailed(String),
     InvalidPacket(String),
+    KeyNotInstalled,
 }
 
 impl std::fmt::Display for SrtpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SrtpError::DecryptFailed(msg)  => write!(f, "RTP decrypt failed: {}", msg),
-            SrtpError::EncryptFailed(msg)  => write!(f, "RTP encrypt failed: {}", msg),
-            SrtpError::InvalidPacket(msg)  => write!(f, "Invalid RTP packet: {}", msg),
+            SrtpError::DecryptFailed(m)  => write!(f, "SRTP decrypt failed: {}", m),
+            SrtpError::EncryptFailed(m)  => write!(f, "SRTP encrypt failed: {}", m),
+            SrtpError::InvalidPacket(m)  => write!(f, "Invalid packet: {}", m),
+            SrtpError::KeyNotInstalled   => write!(f, "SRTP key not installed"),
         }
     }
 }
+
+impl std::error::Error for SrtpError {}
+
+// ============================================================================
+// [테스트]
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // 최소 RTP 헤더 12바이트 (V=2, PT=120, Seq=1, TS=0, SSRC=0x0001E240)
-    const SAMPLE_RTP: [u8; 12] = [0x80, 0x78, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xE2, 0x40];
+    const SAMPLE_RTP: [u8; 12] = [
+        0x80, 0x78, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0xE2, 0x40,
+    ];
 
     #[test]
-    fn passthrough_decrypt_returns_original() {
-        let ctx    = SrtpContext::new();
-        let result = ctx.decrypt(&SAMPLE_RTP).unwrap();
-        assert_eq!(result, &SAMPLE_RTP);
-    }
-
-    #[test]
-    fn passthrough_encrypt_returns_original() {
-        let ctx    = SrtpContext::new();
-        let result = ctx.encrypt(&SAMPLE_RTP).unwrap();
-        assert_eq!(result, &SAMPLE_RTP);
-    }
-
-    #[test]
-    fn empty_packet_passthrough() {
+    fn passthrough_before_key() {
         let ctx = SrtpContext::new();
-        assert_eq!(ctx.decrypt(&[]).unwrap(), &[] as &[u8]);
-        assert_eq!(ctx.encrypt(&[]).unwrap(), &[] as &[u8]);
+        assert!(!ctx.is_ready());
+        assert_eq!(ctx.decrypt(&SAMPLE_RTP).unwrap(), &SAMPLE_RTP);
+        assert_eq!(ctx.encrypt(&SAMPLE_RTP).unwrap(), &SAMPLE_RTP);
+    }
+
+    #[test]
+    fn key_install_marks_ready() {
+        let mut ctx = SrtpContext::new();
+        ctx.install_key(&[0u8; 16], &[0u8; 14]);
+        assert!(ctx.is_ready());
+    }
+
+    #[test]
+    fn passthrough_after_key() {
+        let mut ctx = SrtpContext::new();
+        ctx.install_key(&[0u8; 16], &[0u8; 14]);
+        assert_eq!(ctx.decrypt(&SAMPLE_RTP).unwrap(), &SAMPLE_RTP);
     }
 }

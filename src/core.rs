@@ -170,28 +170,59 @@ impl ChannelHub {
 }
 
 // ----------------------------------------------------------------------------
-// [MediaPeerHub] 미디어 릴레이 핫패스 전용 (ssrc 기반 O(1) 조회)
+// [MediaPeerHub] 미디어 릴레이 핫패스 전용
+//
+// 키 설계 (Phase 2):
+//   by_ufrag : ice-ufrag → Endpoint  (STUN 콜드패스 식별자, 불변)
+//   by_addr  : SocketAddr → Endpoint (UDP 핸패스 캐시, NAT 리바인딩 시 갱신)
+//
+// ssrc는 라우팅 키가 아니라 Endpoint.tracks 내부 메타데이터.
+// BUNDLE 환경에서 하나의 Endpoint에 audio/video/data ssrc가 복수 달림.
 // ----------------------------------------------------------------------------
 
-pub struct MediaPeer {
-    pub ssrc:          u32,
-    pub user_id:       String,      // ssrc → user_id 역매핑
-    pub channel_id:    String,      // 릴레이 대상 채널 식별
-    pub address:       Mutex<Option<SocketAddr>>,
-    pub last_seen:     AtomicU64,   // UDP 패킷 마지막 수신 시간 (좀비 피어 감지용)
+/// BUNDLE 트랙 종류
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackKind {
+    Audio,
+    Video,
+    Data,
+}
+
+/// 트랙 메타데이터 (ssrc 기준)
+pub struct Track {
+    pub ssrc: u32,
+    pub kind: TrackKind,
+}
+
+/// 피어당 엔드포인트 (Phase 2 확장 대비 필드 포함)
+pub struct Endpoint {
+    pub ufrag:      String,             // ICE ufrag — 주키, 불변
+    pub user_id:    String,
+    pub channel_id: String,
+    pub last_seen:  AtomicU64,          // 좌비 피어 감지용
+
+    // 핵패스 캐시: NAT 리바인딩 시 STUN에서 갱신
+    pub address: Mutex<Option<SocketAddr>>,
+
+    // BUNDLE 트랙 목록 (ssrc 기준, 피어당 복수)
+    pub tracks: RwLock<Vec<Track>>,
+
+    // DTLS/SRTP 컨텍스트 (피어당 1개, 모든 트랙 공유)
+    // Phase 2에서 SrtpContext로 교체 예정
     pub inbound_srtp:  Mutex<SrtpContext>,
     pub outbound_srtp: Mutex<SrtpContext>,
 }
 
-impl MediaPeer {
-    pub fn new(ssrc: u32, user_id: String, channel_id: String) -> Self {
-        trace!("Initializing MediaPeer [user: {}, ssrc: {}]", user_id, ssrc);
+impl Endpoint {
+    pub fn new(ufrag: String, user_id: String, channel_id: String) -> Self {
+        trace!("Endpoint::new ufrag={} user={} channel={}", ufrag, user_id, channel_id);
         Self {
-            ssrc,
+            ufrag,
             user_id,
             channel_id,
-            address:       Mutex::new(None),
             last_seen:     AtomicU64::new(current_timestamp()),
+            address:       Mutex::new(None),
+            tracks:        RwLock::new(Vec::new()),
             inbound_srtp:  Mutex::new(SrtpContext::new()),
             outbound_srtp: Mutex::new(SrtpContext::new()),
         }
@@ -201,54 +232,98 @@ impl MediaPeer {
         self.last_seen.store(current_timestamp(), Ordering::Relaxed);
     }
 
-    pub fn update_address(&self, addr: SocketAddr) {
+    /// STUN Latching: 확정된 소스 주소 갱신
+    pub fn latch_address(&self, addr: SocketAddr) {
         *self.address.lock().unwrap() = Some(addr);
         self.touch();
+    }
+
+    pub fn get_address(&self) -> Option<SocketAddr> {
+        *self.address.lock().unwrap()
+    }
+
+    /// 트랙 등록 (ssrc + 종류)
+    pub fn add_track(&self, ssrc: u32, kind: TrackKind) {
+        let mut tracks = self.tracks.write().unwrap();
+        if !tracks.iter().any(|t| t.ssrc == ssrc) {
+            tracks.push(Track { ssrc, kind });
+            trace!("Track added: ssrc={} ufrag={}", ssrc, self.ufrag);
+        }
     }
 }
 
 pub struct MediaPeerHub {
-    pub by_ssrc: RwLock<HashMap<u32, Arc<MediaPeer>>>,
+    // 핵패스 전용: UDP 패킷 수신 시 O(1) 엔드포인트 조회
+    by_addr:  RwLock<HashMap<SocketAddr, Arc<Endpoint>>>,
+    // 콜드패스: STUN USERNAME에서 ufrag 파싱 후 엔드포인트 확정
+    by_ufrag: RwLock<HashMap<String, Arc<Endpoint>>>,
 }
 
 impl MediaPeerHub {
     pub fn new() -> Self {
         trace!("Initializing MediaPeerHub");
-        Self { by_ssrc: RwLock::new(HashMap::new()) }
+        Self {
+            by_addr:  RwLock::new(HashMap::new()),
+            by_ufrag: RwLock::new(HashMap::new()),
+        }
     }
 
-    pub fn insert(&self, ssrc: u32, user_id: &str, channel_id: &str) -> Arc<MediaPeer> {
-        let peer = Arc::new(MediaPeer::new(ssrc, user_id.to_string(), channel_id.to_string()));
-        self.by_ssrc.write().unwrap().insert(ssrc, Arc::clone(&peer));
-        trace!("MediaPeer inserted: ssrc={} user={} channel={}", ssrc, user_id, channel_id);
-        peer
+    /// WS CHANNEL_JOIN 시 등록 — ufrag는 SDP 교환 후 확정
+    pub fn insert(&self, ufrag: &str, user_id: &str, channel_id: &str) -> Arc<Endpoint> {
+        let ep = Arc::new(Endpoint::new(
+            ufrag.to_string(),
+            user_id.to_string(),
+            channel_id.to_string(),
+        ));
+        self.by_ufrag.write().unwrap().insert(ufrag.to_string(), Arc::clone(&ep));
+        trace!("Endpoint inserted: ufrag={} user={} channel={}", ufrag, user_id, channel_id);
+        ep
     }
 
-    pub fn get(&self, ssrc: u32) -> Option<Arc<MediaPeer>> {
-        self.by_ssrc.read().unwrap().get(&ssrc).cloned()
+    /// STUN 콜드패스: ufrag으로 엔드포인트 확정 + by_addr 콜드패스 갱신
+    pub fn latch(&self, ufrag: &str, addr: SocketAddr) -> Option<Arc<Endpoint>> {
+        let ep = self.by_ufrag.read().unwrap().get(ufrag).cloned()?;
+        ep.latch_address(addr);
+        self.by_addr.write().unwrap().insert(addr, Arc::clone(&ep));
+        trace!("Endpoint latched: ufrag={} addr={}", ufrag, addr);
+        Some(ep)
     }
 
-    pub fn remove(&self, ssrc: u32) {
-        self.by_ssrc.write().unwrap().remove(&ssrc);
-        trace!("MediaPeer removed: ssrc={}", ssrc);
+    /// 핵패스: SocketAddr로 O(1) 엔드포인트 조회
+    pub fn get_by_addr(&self, addr: &SocketAddr) -> Option<Arc<Endpoint>> {
+        self.by_addr.read().unwrap().get(addr).cloned()
     }
 
-    /// 채널 내 모든 MediaPeer 반환 (릴레이 대상 목록)
-    pub fn get_channel_peers(&self, channel_id: &str) -> Vec<Arc<MediaPeer>> {
-        self.by_ssrc.read().unwrap()
+    /// 엔드포인트 제거 (WS 종료 또는 CHANNEL_LEAVE)
+    pub fn remove(&self, ufrag: &str) {
+        let ep = self.by_ufrag.write().unwrap().remove(ufrag);
+        if let Some(ep) = ep {
+            if let Some(addr) = ep.get_address() {
+                self.by_addr.write().unwrap().remove(&addr);
+            }
+            trace!("Endpoint removed: ufrag={}", ufrag);
+        }
+    }
+
+    /// 체널 내 모든 엔드포인트 반환 (릴레이 대상 목록)
+    pub fn get_channel_endpoints(&self, channel_id: &str) -> Vec<Arc<Endpoint>> {
+        self.by_ufrag.read().unwrap()
             .values()
-            .filter(|p| p.channel_id == channel_id)
+            .filter(|ep| ep.channel_id == channel_id)
             .cloned()
             .collect()
     }
 
-    /// 좀비 피어 목록 반환
-    pub fn find_zombies(&self, timeout_ms: u64) -> Vec<u32> {
+    /// 좌비 피어 목록 반환 (last_seen 기준)
+    pub fn find_zombies(&self, timeout_ms: u64) -> Vec<String> {
         let now = current_timestamp();
-        self.by_ssrc.read().unwrap()
-            .iter()
-            .filter(|(_, p)| now.saturating_sub(p.last_seen.load(Ordering::Relaxed)) >= timeout_ms)
-            .map(|(ssrc, _)| *ssrc)
+        self.by_ufrag.read().unwrap()
+            .values()
+            .filter(|ep| now.saturating_sub(ep.last_seen.load(Ordering::Relaxed)) >= timeout_ms)
+            .map(|ep| ep.ufrag.clone())
             .collect()
     }
 }
+
+// 호환성 에일리어스 — 기존 코드가 MediaPeer를 참조하는 곳에서 컴파일 에러 방지
+pub type MediaPeer = Endpoint;

@@ -4,6 +4,90 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [TODO] DTLS-SRTP 키 도출 — 구현 전략 확정, 코딩 미완성
+
+**조사 완료 내용** (2026-02-24)
+
+- `dtls-0.17.1` (`~/.cargo/registry`) — `conn/mod.rs` pub fn 목록 확인 결과
+  `export_keying_material()` **없음** (read/write/close/connection_state/selected_srtpprotection_profile 만 존재)
+
+- `webrtc-rs/rtc` 서브모듈 (`C:\work\github\webrtc\rtc\rtc-dtls`) 동일하게 **없음**
+
+- 단, `rtc-dtls/src/prf/mod.rs` 에 필요한 재료 확인:
+  - `EncryptionKeys { master_secret, client_write_key, server_write_key, client_write_iv, server_write_iv }` 구조체 존재
+  - `prf_p_hash()` 함수 존재 (현재 `pub(crate)` — 외부 노출 필요)
+  - RFC 5705 기준 export_keying_material = `prf_p_hash(master_secret, label+client_random+server_random, len)` 로 직접 구현 가능
+
+**확정된 구현 전략**: `rtc-dtls` 포크 후 패치
+  1. `prf_p_hash()` — `pub(crate)` → `pub` 노출
+  2. `DTLSConn::export_keying_material()` 메서드 추가
+  3. `Cargo.toml` `[patch.crates-io]` 섹션에 로컬 path 지정
+  4. `do_handshake()` 내 TODO 블록을 실제 호출로 교체
+
+**다음 작업**: `state.rs` 확인 후 포크 작업 시작
+
+---
+
+## [0.7.0] - 2026-02-24
+
+### Phase 2 완료 — DTLS 핸드셰이크 연결 및 빌드 수정
+
+#### media/dtls.rs
+- `DtlsSessionMap` 추가: `SocketAddr → DtlsPacketTx` 맵, 핸드셰이크 중인 세션 패킷 라우팅
+- `UdpConnAdapter` 재설계: `new()` → `(어댑터, tx)` 쌍 반환, 외부에서 패킷 주입 가능
+- `start_dtls_handshake()` 시그니처 변경: `session_map` 파라미터 추가, 세션 등록/해제 자동 관리
+- `ServerCert::generate()` 정리: 미사용 변수(`key_pem`) 제거, rcgen 0.14 API 정합
+- `sha256_fingerprint()` private 유틸 함수로 정리
+
+#### media/net.rs
+- `run_udp_relay()` 시그니처 변경: `cert`, `session_map` 파라미터 추가
+- `handle_dtls()` 실제 구현: 기존 세션 inject → 신규 세션 핸드셰이크 시작 분기
+- `make_binding_response()` 버그 수정: `v4.ip().clone()` → `*v4.ip()`
+
+#### media.rs
+- `DtlsSessionMap` re-export 추가
+
+#### lib.rs
+- `ServerCert::generate()` 서버 시작 시 1회 생성, 실패 시 조기 종료
+- `DtlsSessionMap` 생성 및 `run_udp_relay()` 에 전달
+- DTLS fingerprint 시작 로그 추가
+
+---
+
+## [0.6.0] - 2026-02-24
+
+### Phase 2 시작 — ICE Lite + DTLS-SRTP 기반 구조 재설계
+
+#### core.rs
+- `MediaPeer` → `Endpoint` 리네임 (`MediaPeer`는 호환성 alias 유지)
+- `MediaPeerHub` 키 재설계: `by_ssrc` 제거 → `by_ufrag`(주키) + `by_addr`(핵패스 캐시)
+- `TrackKind` enum 추가 (Audio / Video / Data)
+- `Track` 구조체 추가 (ssrc + 종류) — BUNDLE 환경에서 ssrc는 라우팅 키가 아니라 Endpoint 내 메타데이터
+- `latch()` 메서드 추가: STUN 콜드패스 후 by_addr 콜드패스 갱신
+
+#### media/net.rs
+- UDP 패킷 타입 판별 로직 추가 (STUN / DTLS / SRTP)
+- STUN 핵들러: USERNAME ufrag 파싱 → latch → Binding Response
+- DTLS 핵들러: Phase 2 스탈 (by_addr 조회만)
+- SRTP 핵들러: by_addr O(1) 핫패스 조회 → 복호화 → 릴레이
+
+#### protocol
+- `ChannelJoinPayload`에 `ufrag` 필드 추가
+- `Session`에 `current_ufrag` 필드 추가
+- `collect_members()` 리팬터: by_ssrc 역조회 → Endpoint.tracks 기반
+
+---
+
+## [0.5.0] - 2026-02-23
+
+### Added
+- `src/http.rs` — HTTP REST API 핸들러 추가
+  - `GET /channels` — 채널 목록 (id, member_count, capacity, created_at)
+  - `GET /channels/{id}` — 채널 상세 + 현재 peer 목록 (user_id, ssrc)
+- `src/lib.rs` — WS 라우터 + HTTP 라우터 merge 구조로 도입
+
+---
+
 ## [0.4.0] - 2026-02-23
 
 ### Added

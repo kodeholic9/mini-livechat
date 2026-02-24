@@ -41,7 +41,8 @@ pub struct ChannelCreatePayload {
 #[derive(Deserialize, Debug)]
 pub struct ChannelJoinPayload {
     pub channel_id: String,
-    pub ssrc:       u32,
+    pub ssrc:       u32,    // audio 트랙 기본 ssrc (클라이언트가 생성)
+    pub ufrag:      String, // ICE ufrag (SDP 교환 후 클라이언트가 전달)
 }
 
 /// op: CHANNEL_LEAVE (12)
@@ -126,6 +127,25 @@ pub struct MessageEventPayload {
 pub struct ErrorPayload {
     pub code:   u16,
     pub reason: String,
+}
+
+/// op: ACK > CHANNEL_LIST 응답 아이템
+#[derive(Serialize, Debug)]
+pub struct ChannelSummary {
+    pub channel_id:   String,
+    pub member_count: usize,
+    pub capacity:     usize,
+    pub created_at:   u64,
+}
+
+/// op: ACK > CHANNEL_INFO 응답
+#[derive(Serialize, Debug)]
+pub struct ChannelInfoData {
+    pub channel_id:   String,
+    pub member_count: usize,
+    pub capacity:     usize,
+    pub created_at:   u64,
+    pub peers:        Vec<MemberInfo>,
 }
 
 // ----------------------------------------------------------------------------
