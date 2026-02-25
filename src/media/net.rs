@@ -204,9 +204,9 @@ async fn handle_srtp(
 
     // inbound 복호화
     let plaintext = {
-        let ctx = ep.inbound_srtp.lock().unwrap();
+        let mut ctx = ep.inbound_srtp.lock().unwrap();
         match ctx.decrypt(packet) {
-            Ok(p)  => p.to_vec(),
+            Ok(p)  => p,
             Err(e) => { warn!("[srtp] decrypt failed user={}: {}", ep.user_id, e); return; }
         }
     };
@@ -236,9 +236,9 @@ async fn relay_to_channel(
         };
 
         let encrypted = {
-            let ctx = target.outbound_srtp.lock().unwrap();
+            let mut ctx = target.outbound_srtp.lock().unwrap();
             match ctx.encrypt(plaintext) {
-                Ok(p)  => p.to_vec(),
+                Ok(p)  => p,
                 Err(e) => { warn!("[relay] encrypt failed user={}: {}", target.user_id, e); continue; }
             }
         };

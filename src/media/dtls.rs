@@ -6,38 +6,32 @@
 //   2. 클라이언트 DTLS ClientHello 수신 → passive 핸드셰이크
 //   3. 핸드셰이크 완료 → RFC 5705 키 도출 → SRTP 컨텍스트 초기화
 //
-// ─────────────────────────────────────────────────────────────────
-// [TODO: DTLS-SRTP 키 도출 미완성]
-//
-//   dtls::conn::DTLSConn 에 export_keying_material() 메서드가
-//   공개 API로 노출되지 않음 (0.17.1 기준 확인 필요).
-//
-//   확인 필요:
-//     %USERPROFILE%\.cargo\registry\src\...\dtls-0.17.1\src\conn\mod.rs
-//     %USERPROFILE%\.cargo\registry\src\...\rcgen-0.13.2\src\certificate.rs
-//
-//   현재 상태: 핸드셰이크 완료까지 동작, 키 설치만 TODO
-//   CHANGELOG.md 에 상세 기재됨
-// ─────────────────────────────────────────────────────────────────
+// RFC 5764 §4.2 키 머티리얼 레이아웃 (AES_CM_128_HMAC_SHA1_80 기준, 60바이트):
+//   [0..16]   client_write_key  (16)  — inbound (브라우저→서버)
+//   [16..32]  server_write_key  (16)  — outbound (서버→브라우저)
+//   [32..46]  client_write_salt (14)
+//   [46..60]  server_write_salt (14)
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rustls_pki_types::CertificateDer;
+use webrtc_util::KeyingMaterialExporter;
 use sha2::{Digest, Sha256};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use crate::core::Endpoint;
+use crate::media::srtp::init_srtp_contexts;
 
-// SRTP 키 도출 라벨 (RFC 5764 §4.2) — TODO 완성 시 사용
-const _SRTP_MASTER_KEY_LABEL:   &str  = "EXTRACTOR-dtls_srtp";
-const _SRTP_MASTER_KEY_LEN:     usize = 16;
-const _SRTP_MASTER_SALT_LEN:    usize = 14;
-const _SRTP_KEY_MATERIAL_LEN:   usize = (_SRTP_MASTER_KEY_LEN + _SRTP_MASTER_SALT_LEN) * 2;
+// RFC 5764 §4.2 — SRTP-DTLS 키 도출 상수
+const SRTP_MASTER_KEY_LABEL: &str  = "EXTRACTOR-dtls_srtp";
+const SRTP_MASTER_KEY_LEN:   usize = 16;
+const SRTP_MASTER_SALT_LEN:  usize = 14;
+// 레이아웃: client_key | server_key | client_salt | server_salt
+const SRTP_KEY_MATERIAL_LEN: usize = (SRTP_MASTER_KEY_LEN + SRTP_MASTER_SALT_LEN) * 2;
 
 // ============================================================================
 // [DtlsPacketTx]
@@ -75,16 +69,30 @@ impl DtlsSessionMap {
             false
         }
     }
+
+    /// tx가 닫힌 세션 = 핸드셰이크 태스크 종료 또는 타임아웃
+    /// 제거 후 제거된 주소 목록 반환
+    pub async fn remove_stale(&self) -> Vec<SocketAddr> {
+        let stale: Vec<SocketAddr> = self.sessions.read().await
+            .iter()
+            .filter(|(_, tx)| tx.is_closed())
+            .map(|(addr, _)| *addr)
+            .collect();
+
+        if !stale.is_empty() {
+            let mut sessions = self.sessions.write().await;
+            for addr in &stale {
+                sessions.remove(addr);
+                debug!("[dtls-map] stale session removed addr={}", addr);
+            }
+        }
+
+        stale
+    }
 }
 
 // ============================================================================
 // [ServerCert]
-//
-// 인증서 생성 방식:
-//   dtls::crypto::Certificate 는 내부적으로 rcgen을 사용하므로,
-//   rcgen 버전 충돌을 피하기 위해 dtls가 노출하는 generate() 헬퍼를 사용.
-//   dtls 0.17.1에 generate() 헬퍼가 없다면 rcgen을 dtls 내부 버전과
-//   동일 버전으로 맞춰 직접 생성.
 // ============================================================================
 
 pub struct ServerCert {
@@ -94,13 +102,10 @@ pub struct ServerCert {
 
 impl ServerCert {
     pub fn generate() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        // dtls::crypto::Certificate::generate() 헬퍼 시도
-        // 내부적으로 rcgen을 사용해 자체서명 인증서를 생성
         let dtls_cert = dtls::crypto::Certificate::generate_self_signed(
             vec!["mini-livechat".to_string()]
         )?;
 
-        // DER 바이트 추출 (fingerprint 계산용)
         let cert_der: Vec<u8> = dtls_cert.certificate
             .first()
             .map(|c| c.to_vec())
@@ -129,12 +134,14 @@ pub async fn start_dtls_handshake(
 
     let session_map2 = Arc::clone(&session_map);
     tokio::spawn(async move {
-        let result = do_handshake(Arc::new(adapter), &endpoint, &cert).await;
+        let timeout = tokio::time::Duration::from_millis(crate::config::DTLS_HANDSHAKE_TIMEOUT_MS);
+        let result  = tokio::time::timeout(timeout, do_handshake(Arc::new(adapter), &endpoint, &cert)).await;
         session_map2.remove(&peer_addr).await;
 
         match result {
-            Ok(())  => info!("[dtls] session complete user={} addr={}", endpoint.user_id, peer_addr),
-            Err(e)  => warn!("[dtls] session failed user={} addr={}: {}", endpoint.user_id, peer_addr, e),
+            Ok(Ok(()))  => info!("[dtls] session complete user={} addr={}", endpoint.user_id, peer_addr),
+            Ok(Err(e))  => warn!("[dtls] session failed user={} addr={}: {}", endpoint.user_id, peer_addr, e),
+            Err(_)      => warn!("[dtls] handshake timeout user={} addr={}", endpoint.user_id, peer_addr),
         }
     });
 }
@@ -168,23 +175,30 @@ async fn do_handshake(
     info!("[dtls] handshake complete user={}", endpoint.user_id);
 
     // ─────────────────────────────────────────────────────────────
-    // TODO: SRTP 키 도출 — export_keying_material() 메서드 미확인
+    // RFC 5705 키 도출
     //
-    // dtls/src/conn/mod.rs 에서 pub fn 목록 확인 후 아래 코드로 교체:
+    // DTLSConn.state 는 pub(crate) 라 직접 접근 불가.
+    // connection_state() 로 State 복사본을 꺼낸 뒤
+    // KeyingMaterialExporter 트레이트의 export_keying_material() 호출.
     //
-    // use crate::media::srtp::init_srtp_contexts;
-    // let material = dtls_conn
-    //     .export_keying_material(_SRTP_MASTER_KEY_LABEL, &[], _SRTP_KEY_MATERIAL_LEN)
-    //     .await?;
-    // let cw_key  = &material[0.._SRTP_MASTER_KEY_LEN];
-    // let sw_key  = &material[_SRTP_MASTER_KEY_LEN.._SRTP_MASTER_KEY_LEN * 2];
-    // let cw_salt = &material[_SRTP_MASTER_KEY_LEN * 2.._SRTP_MASTER_KEY_LEN * 2 + _SRTP_MASTER_SALT_LEN];
-    // let sw_salt = &material[_SRTP_MASTER_KEY_LEN * 2 + _SRTP_MASTER_SALT_LEN..];
-    // init_srtp_contexts(endpoint, cw_key, cw_salt, sw_key, sw_salt)?;
+    // context 파라미터는 반드시 &[] (비어있지 않으면 ContextUnsupported 에러)
     // ─────────────────────────────────────────────────────────────
-    warn!("[dtls] TODO: SRTP key export not yet implemented user={}", endpoint.user_id);
+    let state = dtls_conn.connection_state().await;
+    let material: Vec<u8> = state
+        .export_keying_material(SRTP_MASTER_KEY_LABEL, &[], SRTP_KEY_MATERIAL_LEN)
+        .await
+        .map_err(|e| format!("export_keying_material failed: {e:?}"))?;
 
-    // dtls_conn drop 방지: application data 읽기 루프 (현재 미사용)
+    // RFC 5764 §4.2 레이아웃 슬라이싱
+    let client_key  = &material[0..SRTP_MASTER_KEY_LEN];
+    let server_key  = &material[SRTP_MASTER_KEY_LEN..SRTP_MASTER_KEY_LEN * 2];
+    let client_salt = &material[SRTP_MASTER_KEY_LEN * 2..SRTP_MASTER_KEY_LEN * 2 + SRTP_MASTER_SALT_LEN];
+    let server_salt = &material[SRTP_MASTER_KEY_LEN * 2 + SRTP_MASTER_SALT_LEN..];
+
+    init_srtp_contexts(endpoint, client_key, client_salt, server_key, server_salt)?;
+    info!("[dtls] SRTP keys installed user={}", endpoint.user_id);
+
+    // dtls_conn 유지: application data 읽기 루프
     let mut buf = vec![0u8; 1500];
     loop {
         match dtls_conn.read(&mut buf, None).await {

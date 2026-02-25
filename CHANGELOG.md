@@ -4,54 +4,77 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## [TODO] DTLS-SRTP 키 도출 — 다음 세션 시작점
+## [0.10.0] - 2026-02-25
 
-**조사 완료 내용** (2026-02-24)
+### 좀비 세션 Reaper 완성
 
-**정규 파이프라인 확인:**
-```
-dtls::state::State  →  KeyingMaterialExporter 트레이트 구현
-         ↓
-webrtc-srtp::config::Config::extract_session_keys_from_dtls(state, is_client)
-         ↓
-srtp::context::Context::new(local_key, local_salt, profile, ...)
-```
-- `webrtc-rs/rtc/rtc-srtp/src/config.rs` 에 `extract_session_keys_from_dtls()` 공식 API 존재 확인 ✅
-- `dtls::state::State` 가 `KeyingMaterialExporter` 트레이트 구현 확인 ✅
-- **문제**: 현재 `do_handshake()` 는 `DTLSConn` 만 들고 있고, `DTLSConn.state` 가 `pub(crate)` 라 외부 접근 불가
+#### config.rs
+- `REAPER_INTERVAL_MS = 10_000` — reaper 실행 주기 (기존 HEARTBEAT_INTERVAL_MS와 분리)
+- `DTLS_HANDSHAKE_TIMEOUT_MS = 10_000` — 핸드셰이크 최대 허용 시간
 
-**확정된 전략: `dtls` 버전 업그레이드 (포크 없음)**
-- `webrtc-dtls 0.6.x` 이상부터 `export_keying_material()` 공개 API 추가 여부 확인 필요
-- 포크/아키텍처 전환 없이 `Cargo.toml` 버전만 올리는 정규 방법
+#### media/dtls.rs
+- `start_dtls_handshake()` 에 `tokio::time::timeout` 추가
+  - 타임아웃 시 `session_map.remove()` 호출 후 warn 로그
+- `DtlsSessionMap::remove_stale()` 추가
+  - `tx.is_closed()` 로 종료된 핸드셰이크 세션 감지
+  - 제거된 `SocketAddr` 목록 반환
 
-**⚠️ 롤백 완료 (2026-02-24)**
-- `rtc-dtls/src/conn/mod.rs` 에 잘못 추가한 `export_keying_material()` 패치 롤백 ✅
-- `[patch.crates-io]` 설정 추가 없음 (미진행) ✅
-
-**다음 세션 작업 순서**:
-
-  STEP 1. `webrtc-dtls` 최신 버전 API 확인
-  - `webrtc-dtls 0.6.x` ~ `0.7.x` 의 `DTLSConn` pub fn 목록에서
-    `export_keying_material()` 존재 여부 확인
-  - 확인 방법: `cargo doc` 또는 crates.io 문서
-
-  STEP 2. `Cargo.toml` 버전 업
-  - `dtls = "0.17.1"` → 확인된 버전으로 변경
-  - `webrtc-srtp` 도 동일 계열 버전으로 맞춤
-
-  STEP 3. `do_handshake()` TODO 블록 실제 구현
-  - `dtls_conn.export_keying_material(SRTP_MASTER_KEY_LABEL, &[], KEY_MATERIAL_LEN)`
-  - `webrtc_srtp::config::Config::extract_session_keys_from_dtls()` 호출
-  - `srtp::context::Context::new()` 로 컨텍스트 생성 → endpoint 에 설치
-
-  STEP 4. `cargo build` 확인 (부장님이 직접 실행 후 에러 붙여넣기)
-  ```bash
-  cd C:\work\github\mini-livechat && cargo build 2>&1
-  ```
-
-  STEP 5. 빌드 성공 후 CHANGELOG [0.8.0] 작성
+#### lib.rs
+- `run_zombie_reaper()` 시그니처 확장: `ChannelHub` + `DtlsSessionMap` 추가
+- 1단계: 좀비 User 제거 + 소속 채널 멤버에서 동시 제거
+- 2단계: 좀비 Endpoint 제거 (UDP 패킷 없음)
+- 3단계: 단절된 DTLS 세션 제거 (`remove_stale()`)
+- reaper 간격을 `REAPER_INTERVAL_MS` 로 변경
 
 ---
+
+## [0.9.0] - 2026-02-25
+
+### Phase 2 완료 — SRTP 실제 암복호화 구현
+
+#### media/srtp.rs
+- `SrtpContext` 내부에 `Option<webrtc_srtp::context::Context>` 보관
+- `install_key()` 에서 `Context::new(key, salt, Aes128CmHmacSha1_80, None, None)` 호출
+- `decrypt()` / `encrypt()` 시그니처 변경: `&self` → `&mut self`, 반환 `Vec<u8>`
+- 키 미설치 시 패스스루 제거 → `KeyNotInstalled` 에러 반환
+- `init_srtp_contexts()` 에 `is_ready()` 검증 추가
+- 테스트: `encrypt_decrypt_roundtrip` 추가 (5개 총)
+
+#### media/net.rs
+- `inbound_srtp.lock()` / `outbound_srtp.lock()` 시 `mut` 추가
+- `.decrypt()` / `.encrypt()` 반환값이 `Vec<u8>` 이므로 `.to_vec()` 호출 제거
+
+#### API 확정 (조사 결과)
+- `webrtc_srtp::context::Context::decrypt_rtp()` 반환: `Result<bytes::Bytes>`
+- `webrtc_srtp::context::Context::encrypt_rtp()` 반환: `Result<bytes::Bytes>`
+- 에러 타입: `webrtc_srtp::Error` (`error` 모듈은 `pub(crate)` 라 전체 경로 사용)
+
+---
+
+## [0.8.0] - 2026-02-25
+
+### Phase 2 완료 — DTLS-SRTP 키 도출 구현
+
+#### media/dtls.rs
+- `do_handshake()` TODO 블록 → 실제 구현으로 교체
+- `dtls_conn.connection_state().await` 로 `State` 획득 (`DTLSConn.state` 는 `pub(crate)` 라 직접 접근 불가)
+- `webrtc_util::KeyingMaterialExporter` 트레이트 import 후 `state.export_keying_material()` 호출
+- RFC 5764 §4.2 레이아웃으로 60바이트 슬라이싱: `client_key(16) | server_key(16) | client_salt(14) | server_salt(14)`
+- `init_srtp_contexts(endpoint, ...)` 호출로 Endpoint inbound/outbound SRTP 키 설치
+- 불필요한 언더스코어 상수(`_SRTP_*`) 정리
+
+#### 조사 결과 (2026-02-25)
+- `export_keying_material()` 은 `dtls::state::State` 에 `KeyingMaterialExporter` 트레이트로 구현됨
+- 트레이트 경로: `webrtc_util::KeyingMaterialExporter` (dtls 크레이트 내부가 아님)
+- `context` 파라미터는 반드시 `&[]` — 비어있지 않으면 `ContextUnsupported` 에러
+
+---
+
+## [TODO] (다음 세션)
+- 실제 브라우저 연동 E2E 테스트
+
+---
+
 
 ## [0.7.0] - 2026-02-24
 

@@ -11,6 +11,12 @@ pub const MAX_PEERS_PER_CHANNEL: usize = 100;
 /// 꽉 차면 지연 발생 방지를 위해 오래된 패킷을 버립니다(Drop/Backpressure).
 pub const EGRESS_QUEUE_SIZE: usize = 2048;
 
+/// 좀비 세션 reaper 실행 주기 (10초)
+pub const REAPER_INTERVAL_MS: u64 = 10_000;
+
+/// DTLS 핸드셰이크 최대 허용 시간 (10초)
+pub const DTLS_HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
+
 /// 연결이 끊긴 좀비 세션을 정리하기 위한 타임아웃 (30초)
 pub const ZOMBIE_TIMEOUT_MS: u64 = 30_000;
 
