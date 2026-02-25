@@ -41,8 +41,9 @@ pub struct ChannelCreatePayload {
 #[derive(Deserialize, Debug)]
 pub struct ChannelJoinPayload {
     pub channel_id: String,
-    pub ssrc:       u32,    // audio 트랙 기본 ssrc (클라이언트가 생성)
-    pub ufrag:      String, // ICE ufrag (SDP 교환 후 클라이언트가 전달)
+    pub ssrc:       u32,              // audio 트랙 기본 ssrc (클라이언트가 생성)
+    pub ufrag:      String,           // ICE ufrag
+    pub sdp_offer:  Option<String>,   // WebRTC SDP offer (있으면 answer 생성)
 }
 
 /// op: CHANNEL_LEAVE (12)
@@ -100,6 +101,7 @@ pub struct AckPayload {
 #[derive(Serialize, Debug)]
 pub struct ChannelJoinAckData {
     pub channel_id:     String,
+    pub sdp_answer:     Option<String>,  // SDP offer가 있었을 때만 포함
     pub active_members: Vec<MemberInfo>,
 }
 

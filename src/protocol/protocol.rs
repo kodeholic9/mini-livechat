@@ -33,6 +33,7 @@ pub struct AppState {
     pub user_hub:       Arc<UserHub>,
     pub channel_hub:    Arc<ChannelHub>,
     pub media_peer_hub: Arc<MediaPeerHub>,
+    pub server_cert:    Arc<crate::media::ServerCert>,
 }
 
 // ----------------------------------------------------------------------------
@@ -227,17 +228,22 @@ async fn handle_channel_join(
     session.current_ssrc    = Some(payload.ssrc);
     session.current_ufrag   = Some(payload.ufrag.clone());
 
-    // 3. 본인에게 ACK (현재 채널 멤버 목록 포함)
+    // 3. SDP answer 생성 (offer가 있을 때만)
+    let sdp_answer = payload.sdp_offer.as_deref()
+        .map(|offer| build_sdp_answer(offer, &state.server_cert.fingerprint));
+
+    // 4. 본인에게 ACK (SDP answer + 현재 채널 멤버 목록 포함)
     let active_members = collect_members(&payload.channel_id, state);
     send(tx, make_packet(server::ACK, AckPayload {
         op:   client::CHANNEL_JOIN,
         data: serde_json::to_value(ChannelJoinAckData {
             channel_id:     payload.channel_id.clone(),
+            sdp_answer,
             active_members,
         }).unwrap_or_default(),
     })).await?;
 
-    // 4. 채널 내 다른 멤버들에게 입장 이벤트 브로드캐스트 (본인 제외)
+    // 5. 채널 내 다른 멤버들에게 입장 이벤트 브로드캐스트 (본인 제외)
     let members   = channel.get_members();
     let event_json = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
         event:      "join".to_string(),
@@ -485,6 +491,109 @@ fn collect_members(channel_id: &str, state: &AppState) -> Vec<MemberInfo> {
             MemberInfo { user_id: ep.user_id.clone(), ssrc }
         })
         .collect()
+}
+
+// ----------------------------------------------------------------------------
+// [SDP Answer 생성]
+//
+// 브라우저 offer를 파싱해서 필요한 라인만 추출 후 서버 answer를 조립합니다.
+// webrtc-sdp 크레이트 대신 직접 조립 — 버전 호환성 문제 방지.
+//
+// answer 구조:
+//   - offer의 미디어 라인(m=, a=rtpmap 등) 미러링
+//   - 서버 ICE ufrag/pwd (랜덤 4/22자)
+//   - 서버 DTLS fingerprint (ServerCert에서)
+//   - a=setup:passive (서버는 항상 passive)
+// ----------------------------------------------------------------------------
+
+fn build_sdp_answer(offer: &str, fingerprint: &str) -> String {
+    // offer에서 필요한 정보 추출
+    let session_id  = crate::utils::current_timestamp();
+    let server_ufrag = random_ice_string(4);
+    let server_pwd   = random_ice_string(22);
+
+    // offer의 미디어 섹션(m= 이후) 수집
+    // audio/video 코덱 라인(a=rtpmap, a=fmtp, a=extmap 등) 미러링
+    let mut media_sections = Vec::new();
+    let mut in_media = false;
+    let mut current_section: Vec<&str> = Vec::new();
+    let mut media_type = "";
+
+    for line in offer.lines() {
+        if line.starts_with("m=") {
+            if in_media && !current_section.is_empty() {
+                media_sections.push((media_type, current_section.clone()));
+            }
+            in_media = true;
+            media_type = if line.starts_with("m=audio") { "audio" }
+                         else if line.starts_with("m=video") { "video" }
+                         else { "other" };
+            current_section = vec![line];
+        } else if in_media {
+            // ICE/DTLS 관련 offer 라인은 제외 (서버 것으로 교체)
+            if line.starts_with("a=ice-")       ||
+               line.starts_with("a=fingerprint")||
+               line.starts_with("a=setup")      ||
+               line.starts_with("a=candidate")  ||
+               line.starts_with("c=") {
+                continue;
+            }
+            // sendrecv/sendonly → recvonly로 방향 전환
+            if line == "a=sendrecv" || line == "a=sendonly" {
+                current_section.push("a=recvonly");
+            } else {
+                current_section.push(line);
+            }
+        }
+    }
+    if in_media && !current_section.is_empty() {
+        media_sections.push((media_type, current_section));
+    }
+
+    // answer 조립
+    let mut sdp = String::new();
+
+    // 세션 헤더
+    sdp.push_str("v=0\r\n");
+    sdp.push_str(&format!("o=mini-livechat {} {} IN IP4 0.0.0.0\r\n", session_id, session_id));
+    sdp.push_str("s=-\r\n");
+    sdp.push_str("t=0 0\r\n");
+    sdp.push_str("a=ice-lite\r\n"); // 서버는 ICE Lite
+
+    // 미디어 섹션
+    for (_mtype, lines) in &media_sections {
+        for line in lines {
+            sdp.push_str(line);
+            sdp.push_str("\r\n");
+        }
+        sdp.push_str("c=IN IP4 0.0.0.0\r\n");
+        sdp.push_str(&format!("a=ice-ufrag:{}\r\n", server_ufrag));
+        sdp.push_str(&format!("a=ice-pwd:{}\r\n", server_pwd));
+        sdp.push_str(&format!("a=fingerprint:{}\r\n", fingerprint));
+        sdp.push_str("a=setup:passive\r\n");    // 서버는 DTLS passive
+        sdp.push_str("a=rtcp-mux\r\n");
+    }
+
+    sdp
+}
+
+/// ICE ufrag/pwd용 랜덤 문자열 생성 (alphanumeric)
+fn random_ice_string(len: usize) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // 외부 rand 크레이트 없이 타임스탬프 기반으로 간단 생성
+    // 운영 환경에서는 rand 크레이트 사용 권장
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64;
+    let charset: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/";
+    let mut val = seed ^ (seed << 13) ^ (seed >> 7); // xorshift
+    (0..len).map(|_| {
+        val ^= val << 13;
+        val ^= val >> 7;
+        val ^= val << 17;
+        charset[(val as usize) % charset.len()] as char
+    }).collect()
 }
 
 /// WS 종료 시 클린업

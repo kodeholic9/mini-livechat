@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.11.0] - 2026-02-25
+
+### SDP offer/answer 교환 구현 (CHANNEL_JOIN 확장)
+
+#### protocol/message.rs
+- `ChannelJoinPayload`에 `sdp_offer: Option<String>` 추가
+- `ChannelJoinAckData`에 `sdp_answer: Option<String>` 추가
+
+#### protocol/protocol.rs
+- `AppState`에 `server_cert: Arc<ServerCert>` 추가
+- `handle_channel_join()`에 `build_sdp_answer()` 호출 추가
+- `build_sdp_answer()` 구현: offer 미디어 라인 미러링 + 서버 ICE/DTLS 정보 조립
+- `random_ice_string()`: xorshift 기반 ICE ufrag/pwd 생성
+
+#### lib.rs
+- `AppState` 생성 시 `server_cert` 추가
+
+---
+
 ## [0.10.0] - 2026-02-25
 
 ### 좀비 세션 Reaper 완성

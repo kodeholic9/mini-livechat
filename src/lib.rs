@@ -37,6 +37,7 @@ pub async fn run_server() {
         user_hub:       Arc::clone(&user_hub),
         channel_hub:    Arc::clone(&channel_hub),
         media_peer_hub: Arc::clone(&media_peer_hub),
+        server_cert:    Arc::clone(&server_cert),
     };
 
     // UDP 미디어 릴레이 태스크
