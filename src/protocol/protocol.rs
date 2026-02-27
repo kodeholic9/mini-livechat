@@ -13,7 +13,6 @@ use crate::config;
 use crate::core::{ChannelHub, MediaPeerHub, UserHub};
 use crate::error::LiveError;
 use crate::protocol::{
-    error_code::to_error_code,
     floor,
     message::{
         AckPayload, ChannelCreatePayload, ChannelDeletePayload, ChannelEventPayload,
@@ -35,6 +34,7 @@ pub struct AppState {
     pub channel_hub:    Arc<ChannelHub>,
     pub media_peer_hub: Arc<MediaPeerHub>,
     pub server_cert:    Arc<crate::media::ServerCert>,
+    pub udp_port:       u16,  // SDP answer candidate 포트
 }
 
 // ----------------------------------------------------------------------------
@@ -139,7 +139,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             client::MESSAGE_CREATE => handle_message_create(&broadcast_tx, &session, &state, packet).await,
             client::FLOOR_REQUEST   => floor::handle_floor_request(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.user_hub, &state.channel_hub, packet).await,
             client::FLOOR_RELEASE   => floor::handle_floor_release(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.user_hub, &state.channel_hub, packet).await,
-            client::FLOOR_PONG      => floor::handle_floor_pong(session.user_id.as_deref().unwrap(), &state.channel_hub, packet).await,
+            client::FLOOR_PING      => floor::handle_floor_ping(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.channel_hub, packet).await,
             unknown => {
                 warn!("알 수 없는 opcode: {}", unknown);
                 send(&broadcast_tx, error_packet(LiveError::InvalidOpcode(unknown))).await
@@ -199,12 +199,18 @@ async fn handle_channel_create(
     let payload = parse_payload::<ChannelCreatePayload>(packet.d)?;
     trace!("CHANNEL_CREATE - channel_id: {}", payload.channel_id);
 
-    state.channel_hub.create(&payload.channel_id, config::MAX_PEERS_PER_CHANNEL);
+    state.channel_hub.create(
+        &payload.channel_id,
+        &payload.freq,
+        &payload.channel_name,
+        config::MAX_PEERS_PER_CHANNEL,
+    );
 
     send(tx, make_packet(server::ACK, AckPayload {
         op:   client::CHANNEL_CREATE,
         data: serde_json::json!({
             "channel_id":   payload.channel_id,
+            "freq":         payload.freq,
             "channel_name": payload.channel_name,
         }),
     })).await
@@ -235,7 +241,7 @@ async fn handle_channel_join(
                 .find(|l| l.starts_with("a=setup:"))
                 .unwrap_or("a=setup:(없음)");
             trace!("[sdp] offer a=setup: {}", offer_setup);
-            let (sdp, server_ufrag, server_pwd) = build_sdp_answer(offer, &state.server_cert.fingerprint);
+            let (sdp, server_ufrag, server_pwd) = build_sdp_answer(offer, &state.server_cert.fingerprint, state.udp_port);
             trace!("[sdp] answer built ufrag={} (offer_setup={})", server_ufrag, offer_setup);
             (Some(sdp), server_ufrag, server_pwd)
         }
@@ -381,14 +387,19 @@ async fn handle_channel_list(
 
     let list: Vec<ChannelSummary> = {
         let channels = state.channel_hub.channels.read().unwrap();
-        channels.values()
+        let mut list: Vec<ChannelSummary> = channels.values()
             .map(|ch| ChannelSummary {
                 channel_id:   ch.channel_id.clone(),
+                freq:         ch.freq.clone(),
+                name:         ch.name.clone(),
                 member_count: ch.member_count(),
                 capacity:     ch.capacity,
                 created_at:   ch.created_at,
             })
-            .collect()
+            .collect();
+        // freq 오름쉠으로 정렬 (0001, 0112, ...)
+        list.sort_by(|a, b| a.freq.cmp(&b.freq));
+        list
     };
 
     send(tx, make_packet(server::ACK, AckPayload {
@@ -418,6 +429,8 @@ async fn handle_channel_info(
         op:   client::CHANNEL_INFO,
         data: serde_json::to_value(ChannelInfoData {
             channel_id:   channel.channel_id.clone(),
+            freq:         channel.freq.clone(),
+            name:         channel.name.clone(),
             member_count: channel.member_count(),
             capacity:     channel.capacity,
             created_at:   channel.created_at,
@@ -486,7 +499,7 @@ fn make_no_data(op: u8) -> String {
 
 fn error_packet(err: LiveError) -> String {
     make_packet(server::ERROR, ErrorPayload {
-        code:   to_error_code(&err),
+        code:   err.code(),
         reason: err.to_string(),
     })
 }
@@ -527,7 +540,7 @@ fn collect_members(channel_id: &str, state: &AppState) -> Vec<MemberInfo> {
 /// SDP answer 조립 후 (sdp_string, server_ufrag, server_pwd) 반환
 /// server_ufrag: MediaPeerHub 등록 키
 /// server_pwd:   STUN MESSAGE-INTEGRITY 서명 키
-fn build_sdp_answer(offer: &str, fingerprint: &str) -> (String, String, String) {
+fn build_sdp_answer(offer: &str, fingerprint: &str, udp_port_arg: u16) -> (String, String, String) {
     // --------------------------------------------------------------------
     // SDP Answer 조립 규칙
     //
@@ -543,8 +556,8 @@ fn build_sdp_answer(offer: &str, fingerprint: &str) -> (String, String, String) 
     let session_id   = crate::utils::current_timestamp();
     let server_ufrag = random_ice_string(16);
     let server_pwd   = random_ice_string(22);
-    let local_ip     = detect_local_ip();
-    let udp_port     = crate::config::SERVER_UDP_PORT;
+    let local_ip     = crate::protocol::get_advertise_ip(); // CLI 설정 or 자동 감지
+    let udp_port     = udp_port_arg;
 
     // offer에서 audio 미디어 섹션의 코덱 관련 라인만 수집
     // (ICE/DTLS/방향/c= 제외 — 서버 값으로 교체)
@@ -637,7 +650,7 @@ fn build_sdp_answer(offer: &str, fingerprint: &str) -> (String, String, String) 
 /// 라우팅 테이블 기반 로컬 IP 자동 감지
 /// UDP 소켓으로 8.8.8.8:80 connect (실제 패킷 없음) → local_addr() 조회
 /// 멀티홈 환경에서도 외부 통신에 실제로 쓰이는 인터페이스 IP가 정확히 반환됨
-fn detect_local_ip() -> String {
+pub fn detect_local_ip() -> String {
     use std::net::UdpSocket;
     UdpSocket::bind("0.0.0.0:0")
         .and_then(|s| { s.connect("8.8.8.8:80")?; s.local_addr() })

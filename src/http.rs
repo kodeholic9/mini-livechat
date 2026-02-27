@@ -34,6 +34,8 @@ pub struct HttpState {
 #[derive(Serialize)]
 pub struct ChannelSummary {
     pub channel_id:    String,
+    pub freq:          String,
+    pub name:          String,
     pub member_count:  usize,
     pub capacity:      usize,
     pub created_at:    u64,
@@ -43,6 +45,8 @@ pub struct ChannelSummary {
 #[derive(Serialize)]
 pub struct ChannelDetail {
     pub channel_id:   String,
+    pub freq:         String,
+    pub name:         String,
     pub member_count: usize,
     pub capacity:     usize,
     pub created_at:   u64,
@@ -65,14 +69,17 @@ pub struct PeerInfo {
 pub async fn list_channels(State(state): State<HttpState>) -> impl IntoResponse {
     let channels = state.channel_hub.channels.read().unwrap();
 
-    let list: Vec<ChannelSummary> = channels.values()
+    let mut list: Vec<ChannelSummary> = channels.values()
         .map(|ch| ChannelSummary {
             channel_id:   ch.channel_id.clone(),
+            freq:         ch.freq.clone(),
+            name:         ch.name.clone(),
             member_count: ch.member_count(),
             capacity:     ch.capacity,
             created_at:   ch.created_at,
         })
         .collect();
+    list.sort_by(|a, b| a.freq.cmp(&b.freq));
 
     Json(list)
 }
@@ -99,6 +106,8 @@ pub async fn get_channel(
 
     let detail = ChannelDetail {
         channel_id:   channel.channel_id.clone(),
+        freq:         channel.freq.clone(),
+        name:         channel.name.clone(),
         member_count: channel.member_count(),
         capacity:     channel.capacity,
         created_at:   channel.created_at,

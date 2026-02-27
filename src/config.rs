@@ -37,11 +37,9 @@ pub const DEFAULT_SECRET_KEY: &str = "changeme-secret";
 // Floor Control (MBCP TS 24.380 기반)
 // ----------------------------------------------------------------------------
 
-/// Floor Ping 송신 주기 — Floor Taken 상태에서 서버가 holder에게 보내는 생존 확인 (3초)
-pub const FLOOR_PING_INTERVAL_MS: u64 = 3_000;
-
-/// Floor Pong 응답 대기 시간 — 이 시간 안에 Pong 없으면 Floor Revoke (5초)
-pub const FLOOR_PONG_TIMEOUT_MS: u64 = 5_000;
+/// 클라이언트 Floor Ping 수신 타임아웃 — 이 시간 안에 Ping 없으면 Floor Revoke (6초)
+/// 클라이언트 송신 주기 2초 기준 — 네트워크 지연마지 감안하여 3배 여유 확보
+pub const FLOOR_PING_TIMEOUT_MS: u64 = 6_000;
 
 /// 최대 발언 점유 시간 — Emergency 포함 무조건 Revoke (30초)
 pub const FLOOR_MAX_TAKEN_MS: u64 = 30_000;
@@ -60,3 +58,15 @@ pub const FLOOR_PRIORITY_IMMINENT_PERIL: u8 = 200;
 
 /// 발언권 우선순위 — 일반 기본값
 pub const FLOOR_PRIORITY_DEFAULT: u8 = 100;
+
+// ----------------------------------------------------------------------------
+// 사전 생성 채널 (서버 시작 시 자동 생성)
+// (channel_id, freq, name, capacity)
+// ----------------------------------------------------------------------------
+pub const PRESET_CHANNELS: &[(&str, &str, &str, usize)] = &[
+    ("CH_0001", "0001", "🎯 작전지휘",  10),
+    ("CH_0112", "0112", "🔴 긴급대응",   5),
+    ("CH_0305", "0305", "🛡️ 경계근무",   8),
+    ("CH_0420", "0420", "🚁 항공지원",   6),
+    ("CH_0911", "0911", "📡 상황보고",  20),
+];

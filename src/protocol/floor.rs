@@ -22,11 +22,13 @@ use crate::config;
 use crate::core::{ChannelHub, FloorControl, FloorControlState, FloorIndicator, UserHub};
 use crate::error::LiveError;
 use crate::protocol::message::{
-    FloorGrantedPayload, FloorIdlePayload, FloorIndicatorDto, FloorPingPayload,
+    FloorGrantedPayload, FloorIdlePayload, FloorIndicatorDto,
+    FloorPingPayload, FloorPongPayload,
     FloorQueuePosInfoPayload, FloorReleasePayload, FloorRequestPayload, FloorRevokePayload,
-    FloorTakenPayload, FloorPongPayload, GatewayPacket,
+    FloorTakenPayload, GatewayPacket,
 };
-use crate::protocol::opcode::server;
+#[allow(unused_imports)]
+use crate::protocol::opcode::{client, server};
 
 // ----------------------------------------------------------------------------
 // [DTO 변환]
@@ -282,117 +284,103 @@ pub async fn handle_floor_release(
     Ok(())
 }
 
-/// op: FLOOR_PONG (32) — Floor Ping 응답 (순수 동기 처리, await 없음)
-pub async fn handle_floor_pong(
+/// op: FLOOR_PING (32) — C→S, holder 생존 신호
+/// last_ping_at 갱신 후 FLOOR_PONG(116) 응답
+pub async fn handle_floor_ping(
+    tx:          &mpsc::Sender<String>,
     user_id:     &str,
     channel_hub: &Arc<ChannelHub>,
     packet:      GatewayPacket,
 ) -> Result<(), LiveError> {
-    let payload    = parse_payload::<FloorPongPayload>(packet.d)?;
+    let payload    = parse_payload::<FloorPingPayload>(packet.d)?;
     let channel_id = &payload.channel_id;
 
     let channel = channel_hub.get(channel_id)
         .ok_or_else(|| LiveError::ChannelNotFound(channel_id.clone()))?;
 
-    let mut floor = channel.floor.lock().unwrap();
-    if floor.floor_taken_by.as_deref() != Some(user_id) {
-        return Ok(());
+    {
+        let mut floor = channel.floor.lock().unwrap();
+        if floor.floor_taken_by.as_deref() != Some(user_id) {
+            return Ok(());
+        }
+        floor.on_ping();
+        trace!("Floor Ping rcv: channel={} user={}", channel_id, user_id);
+        // MutexGuard drop
     }
-    if floor.on_pong(payload.seq) {
-        trace!("Floor Pong OK: channel={} user={} seq={}", channel_id, user_id, payload.seq);
-    } else {
-        warn!("Floor Pong seq 불일치: channel={} user={} expected={} got={}",
-            channel_id, user_id, floor.ping_seq, payload.seq);
-    }
-    Ok(())
+
+    // FLOOR_PONG 응답
+    send(tx, make_packet(server::FLOOR_PONG, FloorPongPayload {
+        channel_id: channel_id.clone(),
+    })).await
 }
 
 // ----------------------------------------------------------------------------
-// [Floor Ping 태스크]
+// [Floor 타임아웃 체크] — zombie reaper에서 주기적으로 호출
+// run_floor_ping_task 대체 — 별도 태스크 없이 reaper와 통합
 // ----------------------------------------------------------------------------
 
-pub async fn run_floor_ping_task(
-    user_hub:    Arc<UserHub>,
-    channel_hub: Arc<ChannelHub>,
+/// 모든 채널의 Floor 상태를 순회하며 타임아웃/max_duration Revoke 처리
+/// 반환: 채널수에 비례, Taken 상태 채널만 실질 작업 수행
+pub async fn check_floor_timeouts(
+    user_hub:    &Arc<UserHub>,
+    channel_hub: &Arc<ChannelHub>,
 ) {
-    let mut interval = tokio::time::interval(
-        tokio::time::Duration::from_millis(config::FLOOR_PING_INTERVAL_MS)
-    );
+    let channel_ids: Vec<String> = {
+        channel_hub.channels.read().unwrap().keys().cloned().collect()
+    };
 
-    loop {
-        interval.tick().await;
-
-        let channel_ids: Vec<String> = {
-            channel_hub.channels.read().unwrap().keys().cloned().collect()
+    for channel_id in channel_ids {
+        let channel = match channel_hub.get(&channel_id) {
+            Some(ch) => ch,
+            None     => continue,
         };
 
-        for channel_id in channel_ids {
-            let channel = match channel_hub.get(&channel_id) {
-                Some(ch) => ch,
-                None     => continue,
-            };
+        enum Action {
+            Skip,
+            Revoke {
+                cause:       String,
+                holder:      String,
+                revoke_json: String,
+                packets:     Vec<(Option<String>, Option<String>, String)>,
+                members:     std::collections::HashSet<String>,
+            },
+        }
 
-            // 패턴: lock → 결정 → drop → await
-            enum PingAction {
-                Skip,
-                Revoke { cause: String, holder: String, revoke_json: String, packets: Vec<(Option<String>, Option<String>, String)>, members: std::collections::HashSet<String> },
-                Ping   { holder: String, ping_json: String },
+        let action = {
+            let mut floor = channel.floor.lock().unwrap();
+
+            if floor.state != FloorControlState::Taken {
+                Action::Skip
+            } else if floor.is_max_taken_exceeded() {
+                let holder      = floor.floor_taken_by.clone().unwrap_or_default();
+                let revoke_json = make_packet(server::FLOOR_REVOKE, FloorRevokePayload {
+                    channel_id: channel_id.clone(),
+                    cause:      "max_duration".to_string(),
+                });
+                let members = channel.get_members();
+                let packets = decide_next(&channel_id, &mut floor, &members);
+                Action::Revoke { cause: "max_duration".to_string(), holder, revoke_json, packets, members }
+            } else if floor.is_ping_timeout() {
+                let holder      = floor.floor_taken_by.clone().unwrap_or_default();
+                let revoke_json = make_packet(server::FLOOR_REVOKE, FloorRevokePayload {
+                    channel_id: channel_id.clone(),
+                    cause:      "ping_timeout".to_string(),
+                });
+                let members = channel.get_members();
+                let packets = decide_next(&channel_id, &mut floor, &members);
+                Action::Revoke { cause: "ping_timeout".to_string(), holder, revoke_json, packets, members }
+            } else {
+                Action::Skip
             }
+            // MutexGuard drop
+        };
 
-            let action = {
-                let mut floor = channel.floor.lock().unwrap();
-
-                if floor.state != FloorControlState::Taken {
-                    PingAction::Skip
-                } else if floor.is_max_taken_exceeded() {
-                    let holder = floor.floor_taken_by.clone().unwrap_or_default();
-                    let revoke_json = make_packet(server::FLOOR_REVOKE, FloorRevokePayload {
-                        channel_id: channel_id.clone(),
-                        cause:      "max_duration".to_string(),
-                    });
-                    let members = channel.get_members();
-                    let packets = decide_next(&channel_id, &mut floor, &members);
-                    PingAction::Revoke { cause: "max_duration".to_string(), holder, revoke_json, packets, members }
-                } else if floor.ping_seq > 0 && floor.is_pong_timeout() {
-                    let holder = floor.floor_taken_by.clone().unwrap_or_default();
-                    let revoke_json = make_packet(server::FLOOR_REVOKE, FloorRevokePayload {
-                        channel_id: channel_id.clone(),
-                        cause:      "timeout".to_string(),
-                    });
-                    let members = channel.get_members();
-                    let packets = decide_next(&channel_id, &mut floor, &members);
-                    PingAction::Revoke { cause: "timeout".to_string(), holder, revoke_json, packets, members }
-                } else {
-                    let holder = match &floor.floor_taken_by {
-                        Some(uid) => uid.clone(),
-                        None      => { continue; }
-                    };
-                    let seq      = floor.next_ping_seq();
-                    let ping_json = make_packet(server::FLOOR_PING, FloorPingPayload {
-                        channel_id: channel_id.clone(),
-                        seq,
-                    });
-                    PingAction::Ping { holder, ping_json }
-                }
-                // MutexGuard drop here
-            };
-
-            match action {
-                PingAction::Skip => {}
-                PingAction::Revoke { cause, holder, revoke_json, packets, members } => {
-                    warn!("Floor {} Revoke: channel={} user={}", cause, channel_id, holder);
-                    if let Some(user) = user_hub.get(&holder) {
-                        let _ = user.tx.send(revoke_json).await;
-                    }
-                    dispatch_packets(packets, &members, &user_hub).await;
-                }
-                PingAction::Ping { holder, ping_json } => {
-                    if let Some(user) = user_hub.get(&holder) {
-                        let _ = user.tx.send(ping_json).await;
-                        trace!("Floor Ping sent: channel={} user={}", channel_id, holder);
-                    }
-                }
+        if let Action::Revoke { cause, holder, revoke_json, packets, members } = action {
+            warn!("Floor Revoke ({}): channel={} user={}", cause, channel_id, holder);
+            if let Some(user) = user_hub.get(&holder) {
+                let _ = user.tx.send(revoke_json).await;
             }
+            dispatch_packets(packets, &members, user_hub).await;
         }
     }
 }

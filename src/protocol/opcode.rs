@@ -30,8 +30,8 @@ pub mod client {
     pub const FLOOR_REQUEST: u8 = 30;
     /// PTT 놓음 — 발언권 반납
     pub const FLOOR_RELEASE: u8 = 31;
-    /// Floor Ping 응답 — 서버 Ping에 대한 생존 응답
-    pub const FLOOR_PONG:    u8 = 32;
+    /// Floor Ping — 클라이언트가 holder 생존 신호 전송 (GRANTED 후 2초 주기)
+    pub const FLOOR_PING:    u8 = 32;
 }
 
 /// Server → Client opcodes
@@ -66,6 +66,6 @@ pub mod server {
     pub const FLOOR_REVOKE:         u8 = 114;
     /// 대기열 등록 확인 — Floor Deny 대신 대기열 진입 시 사용
     pub const FLOOR_QUEUE_POS_INFO: u8 = 115;
-    /// 서버 → holder 생존 확인
-    pub const FLOOR_PING:           u8 = 116;
+    /// 서버 → holder Floor Ping 응답 (Pong)
+    pub const FLOOR_PONG:           u8 = 116;
 }

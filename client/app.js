@@ -18,7 +18,7 @@ const state = {
   pttActive: false,
   floorState: 'idle', // 'idle' | 'taken' | 'requesting' | 'queued'
   floorHolder: null, // 현재 발언 중인 user_id
-  floorPingSeq: null, // 서버에서 받은 최신 ping seq
+  floorPingTimer: null, // GRANTED 후 2초 주기 Ping 타이머
   userId: null, // 현재 로그인된 user_id 저장용
 };
 
@@ -183,7 +183,7 @@ function handlePacket(pkt) {
       onFloorQueuePos(pkt.d);
       break;
     case 116:
-      onFloorPing(pkt.d);
+      onFloorPong(pkt.d);
       break;
   }
 }
@@ -210,6 +210,22 @@ function onReady(d) {
 
 function onAck(d) {
   if (d.op === 11) onChannelJoinAck(d.data);
+  if (d.op === 15) onChannelListAck(d.data);
+}
+
+function onChannelListAck(list) {
+  const sel = $('channel-select');
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— 채널을 선택하세요 —</option>';
+  (list || []).forEach((ch) => {
+    const opt = document.createElement('option');
+    opt.value = ch.channel_id;
+    opt.textContent = `${ch.freq}  ${ch.name}  [${ch.member_count}/${ch.capacity}]`;
+    sel.appendChild(opt);
+  });
+  // 이전 선택한 채널이 여전 목록에 있으면 유지
+  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+  log('sys', `CHANNEL_LIST 수신 (${(list || []).length}개)`, 'ok');
 }
 
 function onError(d) {
@@ -410,6 +426,7 @@ function pttStop() {
   if (!state.pttActive) return;
   state.pttActive = false;
   if (state.floorState === 'taken' && state.floorHolder === state.userId) {
+    _stopFloorPing(); // RELEASE 전 Ping 정지
     wsSend({ op: 31, d: { channel_id: state.channel } });
   }
   if (state.floorState === 'requesting') {
@@ -436,6 +453,7 @@ function onFloorGranted(d) {
     setAudioTransmission(true); // 실제 패킷 전송 시작
     $('ptt-btn').textContent = '● TRANSMITTING';
     $('ptt-btn').classList.add('active');
+    _startFloorPing(d.channel_id); // Ping 타이머 시작
   }
 }
 
@@ -478,6 +496,7 @@ function onFloorIdle(d) {
   if (prevHolder) _setMemberSpeaking(prevHolder, false);
 
   if (wasMine) {
+    _stopFloorPing();
     setAudioTransmission(false);
     _resetFloorUI();
   } else {
@@ -492,6 +511,7 @@ function onFloorRevoke(d) {
   state.pttActive = false;
   state.floorState = 'idle';
 
+  if (wasMine) _stopFloorPing();
   setAudioTransmission(false);
   _resetFloorUI();
 
@@ -508,14 +528,24 @@ function onFloorQueuePos(d) {
   log('sys', `FLOOR_QUEUE — pos ${d.queue_position}/${d.queue_size}`);
 }
 
-function onFloorPing(d) {
-  state.floorPingSeq = d.seq;
-  wsSend({ op: 32, d: { channel_id: d.channel_id, seq: d.seq } });
+// 서버 FLOOR_PONG 수신 — 로깅만
+function onFloorPong(d) {
+  // 서버가 살아있음을 확인. 현재는 로깅 용도
+}
 
-  if (state.floorHolder === $('user-id').value.trim()) {
-    if (state.audioSender && state.audioSender.track === null) {
-      setAudioTransmission(true);
-    }
+// GRANTED 후 2초 주기로 FLOOR_PING(op:32) 전송
+function _startFloorPing(channelId) {
+  _stopFloorPing();
+  state.floorPingTimer = setInterval(() => {
+    if (!state.channel) { _stopFloorPing(); return; }
+    wsSend({ op: 32, d: { channel_id: channelId } });
+  }, 2000);
+}
+
+function _stopFloorPing() {
+  if (state.floorPingTimer) {
+    clearInterval(state.floorPingTimer);
+    state.floorPingTimer = null;
   }
 }
 
@@ -569,34 +599,41 @@ function removeMember(userId) {
 // 버튼 상태 및 이벤트
 // ============================================================
 function setButtons(mode) {
-  const d = (id, v) => ($(id).disabled = v);
+  const d = (id, v) => { const el = $(id); if (el) el.disabled = v; };
+  const de = (id, v) => { const el = $(id); if (el) el.disabled = v; };
   if (mode === 'disconnected') {
     d('btn-connect', false);
     d('btn-disconnect', true);
     d('btn-identify', true);
     d('btn-create', true);
+    d('btn-refresh', true);
     d('btn-join', true);
     d('btn-leave', true);
     d('btn-send', true);
     $('chat-input').disabled = true;
     d('ptt-btn', true);
+    $('channel-select').disabled = true;
   } else if (mode === 'connected') {
     d('btn-connect', true);
     d('btn-disconnect', false);
     d('btn-identify', false);
   } else if (mode === 'ready') {
     d('btn-create', false);
+    d('btn-refresh', false);
     d('btn-join', false);
     d('ptt-btn', true);
     d('btn-leave', true);
     d('btn-send', true);
     $('chat-input').disabled = true;
+    $('channel-select').disabled = false;
+    // READY 시 자동으로 채널 목록 요청
+    wsSend({ op: 15, d: null });
   } else if (mode === 'joined') {
     d('btn-join', true);
     d('btn-leave', false);
     d('btn-send', false);
     $('chat-input').disabled = false;
-    d('ptt-btn', false);
+    // PTT는 DTLS 커넥션 완료 후 활성화 (onconnectionstatechange에서 처리)
   }
 }
 
@@ -630,15 +667,27 @@ $('btn-identify').onclick = () => {
   });
 };
 
+$('btn-refresh').onclick = () => {
+  wsSend({ op: 15, d: null });
+};
+
 $('btn-create').onclick = () => {
-  const ch = $('channel-id').value.trim();
-  wsSend({ op: 10, d: { channel_id: ch, channel_name: ch } });
+  const freq = $('ch-freq').value.trim();
+  const name = $('ch-name').value.trim();
+  const id   = $('ch-id').value.trim();
+  if (!freq || !name || !id) {
+    log('sys', '주파수 / 채널명 / channel_id 필수', 'err');
+    return;
+  }
+  wsSend({ op: 10, d: { channel_id: id, freq: freq, channel_name: name } });
+  // 생성 후 목록 자동 갱신
+  setTimeout(() => wsSend({ op: 15, d: null }), 200);
 };
 
 $('btn-join').onclick = async () => {
-  const ch = $('channel-id').value.trim();
+  const ch = $('channel-select').value;
   if (!ch) {
-    log('sys', 'channel_id 필요', 'err');
+    log('sys', '채널을 선택하세요', 'err');
     return;
   }
 
@@ -675,6 +724,7 @@ $('btn-leave').onclick = () => {
   setState('channel', '—');
   $('member-list').innerHTML = '';
   $('sdp-viewer').textContent = '—';
+  _stopFloorPing();
   pttStop();
   state.floorState = 'idle';
   state.floorHolder = null;
@@ -682,6 +732,8 @@ $('btn-leave').onclick = () => {
   state.pc?.close();
   state.pc = null;
   setButtons('ready');
+  // LEAVE 후 수용인원 반영 갱신
+  setTimeout(() => wsSend({ op: 15, d: null }), 200);
 };
 
 function sendChat() {
@@ -726,6 +778,31 @@ document.addEventListener('keyup', (e) => {
   }
 });
 
+// ============================================================
+// 랜덤 User ID 생성
+// 형식: 형용사_동물_4자리숫자 (예: swift_falcon_4821)
+// crypto.getRandomValues 기반 — Math.random() 보다 충돌 가능성 낮음
+// ============================================================
+const ADJ = [
+  'swift','brave','silent','sharp','iron','ghost',
+  'storm','cold','dark','bold','echo','lone',
+];
+const NOUN = [
+  'falcon','wolf','raven','viper','eagle','shark',
+  'hawk','lynx','fox','cobra','tiger','bear',
+];
+
+function generateUserId() {
+  const rand = (arr) => arr[Math.floor(crypto.getRandomValues(new Uint32Array(1))[0] / 0xFFFFFFFF * arr.length)];
+  const num  = String(crypto.getRandomValues(new Uint16Array(1))[0]).padStart(4, '0').slice(-4);
+  return `${rand(ADJ)}_${rand(NOUN)}_${num}`;
+}
+
+$('btn-gen-id').onclick = () => {
+  $('user-id').value = generateUserId();
+};
+
 // 초기화
+$('user-id').value = generateUserId();  // 페이지 로드 시 자동 생성
 log('sys', 'mini-livechat E2E client ready');
 log('sys', 'SPACEBAR = PTT while in channel');

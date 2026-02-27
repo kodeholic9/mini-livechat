@@ -499,13 +499,20 @@
 
         <div class="section">
           <div class="section-label">인증</div>
-          <input
-            type="text"
-            id="user-id"
-            value="user_alice"
-            placeholder="user_id"
-            style="margin-bottom: 6px"
-          />
+          <div style="display:flex; gap:6px; margin-bottom:6px;">
+            <input
+              type="text"
+              id="user-id"
+              placeholder="user_id"
+              style="flex:1"
+            />
+            <button
+              class="btn btn-primary"
+              id="btn-gen-id"
+              title="랜덤 ID 생성"
+              style="width:36px; padding:0; font-size:16px; flex-shrink:0"
+            >↻</button>
+          </div>
           <input
             type="text"
             id="token"
@@ -539,25 +546,56 @@
         </div>
 
         <div class="section">
-          <div class="section-label">채널</div>
-          <input
-            type="text"
-            id="channel-id"
-            value="CH_001"
-            placeholder="channel_id"
-            style="margin-bottom: 6px"
-          />
-          <div class="grid-2">
-            <button class="btn btn-primary" id="btn-create" disabled>
-              CREATE
-            </button>
+          <div class="section-label">채널 선택</div>
+          <select
+            id="channel-select"
+            disabled
+            style="
+              width: 100%;
+              background: var(--bg);
+              border: 1px solid var(--border);
+              color: var(--text);
+              font-family: var(--mono);
+              font-size: 11px;
+              padding: 7px 10px;
+              outline: none;
+              margin-bottom: 6px;
+              cursor: pointer;
+            "
+          >
+            <option value="">— 채널을 선택하세요 —</option>
+          </select>
+          <div class="grid-2 mt4">
+            <button class="btn btn-primary" id="btn-refresh" disabled>↺ LIST</button>
             <button class="btn btn-primary" id="btn-join" disabled>JOIN</button>
           </div>
           <div class="mt4">
-            <button class="btn btn-danger" id="btn-leave" disabled>
-              LEAVE
-            </button>
+            <button class="btn btn-danger" id="btn-leave" disabled>LEAVE</button>
           </div>
+        </div>
+
+        <div class="section">
+          <div class="section-label">채널 생성</div>
+          <input
+            type="text"
+            id="ch-freq"
+            placeholder="주파수 (4자리, 예: 0312)"
+            maxlength="4"
+            style="margin-bottom: 6px"
+          />
+          <input
+            type="text"
+            id="ch-name"
+            placeholder="채널명 (이모지 가능)"
+            style="margin-bottom: 6px"
+          />
+          <input
+            type="text"
+            id="ch-id"
+            placeholder="channel_id (예: CH_0312)"
+            style="margin-bottom: 6px"
+          />
+          <button class="btn btn-primary" id="btn-create" disabled>CREATE</button>
         </div>
 
         <div class="ptt-section">

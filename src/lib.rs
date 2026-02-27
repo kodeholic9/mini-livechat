@@ -16,10 +16,25 @@ use crate::core::{ChannelHub, MediaPeerHub, UserHub};
 use crate::media::{DtlsSessionMap, ServerCert};
 use crate::protocol::{ws_handler, AppState};
 
-pub async fn run_server() {
+/// CLI에서 주입되는 런타임 설정
+/// - 기본값은 config.rs 상수
+/// - 비밀값(SECRET)은 환경변수로 별도 관리
+pub struct ServerArgs {
+    pub port:         u16,
+    pub udp_port:     u16,
+    pub advertise_ip: Option<String>, // None이면 detect_local_ip() 자동 감지
+}
+
+pub async fn run_server(args: ServerArgs) {
     let user_hub       = Arc::new(UserHub::new());
     let channel_hub    = Arc::new(ChannelHub::new());
     let media_peer_hub = Arc::new(MediaPeerHub::new());
+
+    // 사전 정의 채널 5개 생성
+    for (channel_id, freq, name, capacity) in config::PRESET_CHANNELS {
+        channel_hub.create(channel_id, freq, name, *capacity);
+        info!("[channel] preset created: {} freq={} name={} cap={}", channel_id, freq, name, capacity);
+    }
 
     // DTLS 자체서명 인증서 — 프로세스 시작 시 1회 생성, 전체 공유
     let server_cert = match ServerCert::generate() {
@@ -38,6 +53,7 @@ pub async fn run_server() {
         channel_hub:    Arc::clone(&channel_hub),
         media_peer_hub: Arc::clone(&media_peer_hub),
         server_cert:    Arc::clone(&server_cert),
+        udp_port:       args.udp_port,
     };
 
     // UDP 미디어 릴레이 태스크
@@ -46,15 +62,11 @@ pub async fn run_server() {
         Arc::clone(&channel_hub),
         Arc::clone(&server_cert),
         Arc::clone(&dtls_session_map),
+        args.udp_port,
+        args.advertise_ip.clone(),
     ));
 
-    // Floor Ping 태스크 (Floor Taken 상태에서 holder 생존 확인)
-    tokio::spawn(crate::protocol::floor::run_floor_ping_task(
-        Arc::clone(&user_hub),
-        Arc::clone(&channel_hub),
-    ));
-
-    // 좀비 세션 자동 종료 태스크
+    // 좀비 세션 자동 종료 태스크 (Floor 타임아웃 체크 포함)
     tokio::spawn(run_zombie_reaper(
         Arc::clone(&user_hub),
         Arc::clone(&channel_hub),
@@ -66,12 +78,17 @@ pub async fn run_server() {
         .route("/ws", get(ws_handler))
         .with_state(app_state);
 
-    let addr     = format!("0.0.0.0:{}", config::SIGNALING_PORT);
+    let addr     = format!("0.0.0.0:{}", args.port);
     let listener = TcpListener::bind(&addr).await.unwrap();
 
     info!("[mini-livechat] Signaling Server on ws://{}", addr);
-    info!("[mini-livechat] UDP Media Relay on port {}", config::SERVER_UDP_PORT);
+    info!("[mini-livechat] UDP Media Relay on port {}", args.udp_port);
     info!("[mini-livechat] DTLS fingerprint: {}", server_cert.fingerprint);
+    if let Some(ref ip) = args.advertise_ip {
+        info!("[mini-livechat] Advertise IP: {} (manual)", ip);
+    } else {
+        info!("[mini-livechat] Advertise IP: auto detect");
+    }
 
     axum::serve(listener, app).await.unwrap();
 }
@@ -127,6 +144,9 @@ async fn run_zombie_reaper(
         for addr in &stale {
             info!("[zombie-reaper] dtls session stale addr={}", addr);
         }
+
+        // 4. Floor 타임아웃 체크 (ping_timeout / max_duration Revoke)
+        crate::protocol::floor::check_floor_timeouts(&user_hub, &channel_hub).await;
 
         let total = dead_users.len() + dead_peers.len() + stale.len();
         if total > 0 {

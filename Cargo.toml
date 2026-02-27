@@ -34,6 +34,7 @@ sha2               = "0.10"
 rustls-pki-types   = "1"
 async-trait = "0.1"
 rand        = "0.8"
+clap        = { version = "4", features = ["derive"] }
 hmac        = "0.12"
 sha-1       = "0.10"
 crc32fast   = "1"

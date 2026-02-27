@@ -29,6 +29,7 @@ pub struct IdentifyPayload {
 #[derive(Deserialize, Debug)]
 pub struct ChannelCreatePayload {
     pub channel_id:   String,
+    pub freq:         String,   // 주파수번호 4자리
     pub channel_name: String,
 }
 
@@ -128,6 +129,8 @@ pub struct ErrorPayload {
 #[derive(Serialize, Debug)]
 pub struct ChannelSummary {
     pub channel_id:   String,
+    pub freq:         String,
+    pub name:         String,
     pub member_count: usize,
     pub capacity:     usize,
     pub created_at:   u64,
@@ -137,6 +140,8 @@ pub struct ChannelSummary {
 #[derive(Serialize, Debug)]
 pub struct ChannelInfoData {
     pub channel_id:   String,
+    pub freq:         String,
+    pub name:         String,
     pub member_count: usize,
     pub capacity:     usize,
     pub created_at:   u64,
@@ -197,11 +202,10 @@ pub struct FloorReleasePayload {
     pub channel_id: String,
 }
 
-/// op: FLOOR_PONG (32) — C→S, Floor Ping 응답
+/// op: FLOOR_PING (32) — C→S, holder 생존 신호
 #[derive(Deserialize, Debug)]
-pub struct FloorPongPayload {
+pub struct FloorPingPayload {
     pub channel_id: String,
-    pub seq:        u32,
 }
 
 /// op: FLOOR_GRANTED (110) — S→C, 발언권 허가
@@ -248,9 +252,8 @@ pub struct FloorQueuePosInfoPayload {
     pub queue_size:     usize,
 }
 
-/// op: FLOOR_PING (116) — S→C, holder 생존 확인
+/// op: FLOOR_PONG (116) — S→C, 서버가 holder의 Ping에 응답
 #[derive(Serialize, Debug)]
-pub struct FloorPingPayload {
+pub struct FloorPongPayload {
     pub channel_id: String,
-    pub seq:        u32,
 }

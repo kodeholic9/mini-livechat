@@ -102,6 +102,8 @@ impl UserHub {
 
 pub struct Channel {
     pub channel_id: String,
+    pub freq:       String,             // 주파수번호 4자리 (예: "0312")
+    pub name:       String,             // 채널명 (이모지 포함 가능)
     pub capacity:   usize,
     pub created_at: u64,
     pub members:    RwLock<HashSet<String>>,    // user_id
@@ -109,10 +111,12 @@ pub struct Channel {
 }
 
 impl Channel {
-    pub fn new(channel_id: String, capacity: usize) -> Self {
-        trace!("Creating Channel: {}", channel_id);
+    pub fn new(channel_id: String, freq: String, name: String, capacity: usize) -> Self {
+        trace!("Creating Channel: {} freq={} name={}", channel_id, freq, name);
         Self {
             channel_id,
+            freq,
+            name,
             capacity,
             created_at: current_timestamp(),
             members:    RwLock::new(HashSet::new()),
@@ -191,10 +195,8 @@ pub struct FloorControl {
     pub floor_indicator: FloorIndicator,
     /// 발언 대기열 — priority 내림차순, 동일 priority는 FIFO
     pub queue:           VecDeque<FloorQueueEntry>,
-    /// Floor Ping 시퀀스 번호 — Pong 매칭용
-    pub ping_seq:        u32,
-    /// 마지막 Pong 수신 시각 — 타임아웃 감지용
-    pub last_pong_at:    u64,
+    /// 마지막 클라이언트 Ping 수신 시각 — 타임아웃 감지용
+    pub last_ping_at:    u64,
 }
 
 impl FloorControl {
@@ -206,8 +208,7 @@ impl FloorControl {
             floor_priority:  0,
             floor_indicator: FloorIndicator::Normal,
             queue:           VecDeque::new(),
-            ping_seq:        0,
-            last_pong_at:    0,
+            last_ping_at:    0,
         }
     }
 
@@ -218,8 +219,7 @@ impl FloorControl {
         self.floor_taken_at  = None;
         self.floor_priority  = 0;
         self.floor_indicator = FloorIndicator::Normal;
-        self.ping_seq        = 0;
-        self.last_pong_at    = 0;
+        self.last_ping_at    = 0;
     }
 
     /// 발언권 부여 (Grant)
@@ -229,8 +229,7 @@ impl FloorControl {
         self.floor_taken_at  = Some(current_timestamp());
         self.floor_priority  = priority;
         self.floor_indicator = indicator;
-        self.ping_seq        = 0;
-        self.last_pong_at    = current_timestamp();
+        self.last_ping_at    = current_timestamp(); // Grant 시점을 초기값으로 설정
     }
 
     /// 대기열에 요청 추가 — priority 내림차순 삽입 (높은 priority가 앞)
@@ -269,26 +268,15 @@ impl FloorControl {
         }
     }
 
-    /// Floor Ping 발송 전 seq 증가 후 반환
-    pub fn next_ping_seq(&mut self) -> u32 {
-        self.ping_seq = self.ping_seq.wrapping_add(1);
-        self.ping_seq
+    /// 클라이언트 Ping 수신 — last_ping_at 갱신
+    pub fn on_ping(&mut self) {
+        self.last_ping_at = current_timestamp();
     }
 
-    /// Floor Pong 수신 처리 — seq 일치 여부 확인 후 last_pong_at 갱신
-    pub fn on_pong(&mut self, seq: u32) -> bool {
-        if seq == self.ping_seq {
-            self.last_pong_at = current_timestamp();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Pong 타임아웃 여부 (last_pong_at 기준)
-    pub fn is_pong_timeout(&self) -> bool {
+    /// Ping 타임아웃 여부 (last_ping_at 기준)
+    pub fn is_ping_timeout(&self) -> bool {
         if self.state != FloorControlState::Taken { return false; }
-        current_timestamp().saturating_sub(self.last_pong_at) >= config::FLOOR_PONG_TIMEOUT_MS
+        current_timestamp().saturating_sub(self.last_ping_at) >= config::FLOOR_PING_TIMEOUT_MS
     }
 
     /// 최대 발언 시간 초과 여부
@@ -311,10 +299,15 @@ impl ChannelHub {
         Self { channels: RwLock::new(HashMap::new()) }
     }
 
-    pub fn create(&self, channel_id: &str, capacity: usize) -> Arc<Channel> {
+    pub fn create(&self, channel_id: &str, freq: &str, name: &str, capacity: usize) -> Arc<Channel> {
         let mut channels = self.channels.write().unwrap();
         let ch = channels.entry(channel_id.to_string()).or_insert_with(|| {
-            Arc::new(Channel::new(channel_id.to_string(), capacity))
+            Arc::new(Channel::new(
+                channel_id.to_string(),
+                freq.to_string(),
+                name.to_string(),
+                capacity,
+            ))
         });
         Arc::clone(ch)
     }

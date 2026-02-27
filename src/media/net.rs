@@ -12,7 +12,6 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tracing::{debug, info, trace, warn};
 
-use crate::config;
 use crate::core::{ChannelHub, FloorControlState, MediaPeerHub};
 use crate::media::dtls::{DtlsSessionMap, ServerCert, start_dtls_handshake};
 
@@ -58,12 +57,22 @@ fn classify(buf: &[u8]) -> PacketKind {
 // ----------------------------------------------------------------------------
 
 pub async fn run_udp_relay(
-    peer_hub:    Arc<MediaPeerHub>,
-    channel_hub: Arc<ChannelHub>,
-    cert:        Arc<ServerCert>,
-    session_map: Arc<DtlsSessionMap>,
+    peer_hub:     Arc<MediaPeerHub>,
+    channel_hub:  Arc<ChannelHub>,
+    cert:         Arc<ServerCert>,
+    session_map:  Arc<DtlsSessionMap>,
+    udp_port:     u16,
+    advertise_ip: Option<String>,
 ) {
-    let addr   = format!("0.0.0.0:{}", config::SERVER_UDP_PORT);
+    // advertise_ip: SDP candidate에 광고할 IP
+    // None이면 라우팅 테이블 기반 자동 감지
+    let adv_ip = advertise_ip.unwrap_or_else(|| crate::protocol::protocol::detect_local_ip());
+    info!("[media] advertise IP: {}", adv_ip);
+
+    // 라우팅 테이블에 광고 IP 저장 (이후 SDP answer 생성 시 사용)
+    crate::protocol::set_advertise_ip(adv_ip);
+
+    let addr   = format!("0.0.0.0:{}", udp_port);
     let socket = match UdpSocket::bind(&addr).await {
         Ok(s)  => { info!("[media] UDP relay on {}", addr); Arc::new(s) }
         Err(e) => { tracing::error!("[media] bind failed: {}", e); return; }
@@ -130,7 +139,18 @@ async fn handle_stun(
     cert:        Arc<ServerCert>,
     session_map: Arc<DtlsSessionMap>,
 ) {
-    trace!("[stun] Binding Request from {}", src_addr);
+    // 핸패스: 이미 latch된 addr이면 write lock 없이 touch() + Response만
+    if let Some(ep) = hub.get_by_addr(&src_addr) {
+        ep.touch();
+        trace!("[stun] keepalive from known addr={} user={}", src_addr, ep.user_id);
+        if let Some(resp) = make_binding_response(packet, src_addr, &ep.ice_pwd) {
+            let _ = socket.send_to(&resp, src_addr).await;
+        }
+        return;
+    }
+
+    // 콜드패스: 최초 latch
+    trace!("[stun] cold path Binding Request from {}", src_addr);
 
     let ufrag = match parse_stun_username(packet) {
         Some(u) => u,

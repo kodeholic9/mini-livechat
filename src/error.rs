@@ -55,4 +55,32 @@ impl fmt::Display for LiveError {
 
 impl std::error::Error for LiveError {}
 
+impl LiveError {
+    pub fn code(&self) -> u16 {
+        match self {
+            // 1xxx: 연결/인증
+            LiveError::NotAuthenticated        => 1000,
+            LiveError::InvalidToken            => 1001,
+            LiveError::InvalidOpcode(_)        => 1003,
+            LiveError::InvalidPayload(_)       => 1004,
+
+            // 2xxx: 채널
+            LiveError::ChannelNotFound(_)      => 2000,
+            LiveError::ChannelFull(_)          => 2001,
+            LiveError::ChannelAccessDenied(_)  => 2002,
+            LiveError::AlreadyInChannel(_)     => 2003,
+            LiveError::NotInChannel(_)         => 2004,
+
+            // 3xxx: 메시지
+            LiveError::EmptyMessage            => 3000,
+            LiveError::MessageTooLong(_)       => 3001,
+            LiveError::MessageNotInChannel(_)  => 3002,
+
+            // 9xxx: 서버 내부
+            LiveError::InternalError(_)
+            | LiveError::IoError(_)            => 9000,
+        }
+    }
+}
+
 pub type LiveResult<T> = Result<T, LiveError>;
