@@ -1,6 +1,6 @@
 # Mini LiveChat
 
-초고성능 무전(PTT) 및 실시간 미디어 릴레이를 위한 경량 백엔드 서버 엔진입니다.
+초고성능 무전(PTT) 및 실시간 미디어 릴레이를 위한 경량 백엔드 서버 엔진입니다.  
 Rust + Tokio + Axum 기반으로 엣지 디바이스 환경에서도 안정적으로 동작하도록 설계되었습니다.
 
 ---
@@ -8,19 +8,22 @@ Rust + Tokio + Axum 기반으로 엣지 디바이스 환경에서도 안정적�
 ## 아키텍처 개요
 
 ```
-클라이언트 (WS)
+클라이언트 (WebSocket)
     │
     ▼
-WebSocket Gateway (Axum)
+WebSocket Gateway (Axum, TCP)
     │
     ├── IDENTIFY     → UserHub 등록 (라우팅 테이블)
-    ├── CHANNEL_JOIN → ChannelHub 멤버 등록 + MediaPeerHub SSRC 등록
-    ├── MESSAGE      → ChannelHub 멤버 목록 → UserHub.broadcast_to()
-    └── CHANNEL_LEAVE/WS 종료 → 자동 클린업
+    ├── CHANNEL_JOIN → ChannelHub 멤버 등록 + MediaPeerHub ICE ufrag 등록 + SDP answer 생성
+    ├── FLOOR_REQUEST → FloorControl 상태머신 (Grant / Queue / Preempt)
+    ├── MESSAGE_CREATE → ChannelHub 멤버 목록 → UserHub.broadcast_to()
+    └── CHANNEL_LEAVE / WS 종료 → 자동 클린업
 
-UDP (미디어 릴레이, net.rs — 구현 예정)
+UDP 미디어 릴레이 (net.rs, ICE Lite + DTLS-SRTP)
     │
-    └── ssrc → MediaPeerHub O(1) 조회 → SRTP 암복호화 → 릴레이
+    ├── STUN  → ICE ufrag 파싱 → MediaPeerHub latch → Binding Response
+    ├── DTLS  → 핸드셰이크 → keying material 추출 → SRTP 키 설치
+    └── SRTP  → by_addr O(1) 조회 → 복호화 → Floor 게이트 → 채널 릴레이
 ```
 
 ### 상태 관리 3계층
@@ -28,15 +31,56 @@ UDP (미디어 릴레이, net.rs — 구현 예정)
 | 허브 | 키 | 역할 |
 |---|---|---|
 | `UserHub` | user_id | WS 세션 + 브로드캐스트 라우팅 테이블 |
-| `ChannelHub` | channel_id | 채널 정의 + 멤버 목록 |
-| `MediaPeerHub` | ssrc | 미디어 릴레이 핫패스 (O(1) 조회) |
+| `ChannelHub` | channel_id | 채널 정의 + 멤버 목록 + FloorControl 상태 |
+| `MediaPeerHub` | ufrag / SocketAddr | 미디어 릴레이 핫패스 (O(1) 조회) |
 
 ### 설계 원칙
 
 - **제어/데이터 평면 분리** — WebSocket(시그널링)과 UDP(미디어)를 완전 분리
-- **핫패스 O(1)** — SSRC 기반 MediaPeerHub로 UDP 패킷 수신 시 즉시 피어 조회
-- **좀비 감지** — `last_seen` 기반 타임아웃으로 끊긴 세션/피어 자동 감지
-- **Lock-Free 지향** — `AtomicU64`로 last_seen 갱신, `RwLock`으로 읽기 병렬화
+- **ICE Lite** — candidate 단일 고정 IP, 전체 ICE 협상 없이 latch
+- **핫패스 O(1)** — SocketAddr → Endpoint by_addr 맵으로 UDP 수신 즉시 피어 조회
+- **Floor 게이트** — SRTP 릴레이는 Floor Taken 상태의 holder 패킷만 통과
+- **Lock 안전 패턴** — MutexGuard를 await 포인트 이전에 반드시 drop
+- **좀비 감지** — `last_seen` / `last_ping_at` 기반 타임아웃, zombie reaper 주기 정리
+
+---
+
+## 빌드 및 실행
+
+```bash
+# 빌드
+cargo build --release
+
+# 기본 실행 (포트/IP 기본값 사용)
+cargo run
+
+# CLI 인자로 설정 주입
+cargo run -- --port 8080 --udp-port 10000
+
+# 외부 공인 IP 수동 지정 (도커/NAT 환경)
+cargo run -- --port 8080 --udp-port 10000 --advertise-ip 203.0.113.10
+
+# 로그 레벨 설정
+RUST_LOG=info cargo run
+RUST_LOG=trace cargo run -- --port 8080 --udp-port 10000
+```
+
+### CLI 인자
+
+| 인자 | 기본값 | 설명 |
+|---|---|---|
+| `--port` | `8080` | WebSocket 시그널링 서버 TCP 포트 |
+| `--udp-port` | `10000` | UDP 미디어 릴레이 포트 |
+| `--advertise-ip` | 자동 감지 | SDP candidate에 광고할 IP. 생략 시 라우팅 테이블로 로컬 IP 자동 감지 |
+
+> **NAT / 도커 환경**: 컨테이너 내부 IP와 외부 접근 IP가 다를 경우 `--advertise-ip`로 공인 IP를 명시해야 WebRTC ICE가 정상 동작합니다.
+
+### 환경변수
+
+| 변수 | 기본값 | 설명 |
+|---|---|---|
+| `LIVECHAT_SECRET` | `changeme-secret` | IDENTIFY 토큰 검증용 Secret Key. 운영 환경에서는 반드시 교체할 것 |
+| `RUST_LOG` | — | 로그 레벨 (`error` / `warn` / `info` / `debug` / `trace`) |
 
 ---
 
@@ -45,7 +89,7 @@ UDP (미디어 릴레이, net.rs — 구현 예정)
 디스코드 Gateway 스타일 opcode 기반 패킷 구조를 채택합니다.
 
 ```json
-{ "op": 11, "d": { "channel_id": "CH_001", "ssrc": 12345 } }
+{ "op": 11, "d": { "channel_id": "CH_001", "ssrc": 12345, "ufrag": "abcd1234" } }
 ```
 
 ### Client → Server Opcodes
@@ -53,13 +97,18 @@ UDP (미디어 릴레이, net.rs — 구현 예정)
 | op | 이름 | 설명 |
 |---|---|---|
 | 1 | HEARTBEAT | 연결 유지 |
-| 3 | IDENTIFY | 인증 (user_id, token) |
-| 10 | CHANNEL_CREATE | 채널 생성 |
-| 11 | CHANNEL_JOIN | 채널 참여 (ssrc 포함) |
+| 3 | IDENTIFY | 인증 (user_id, token, priority) |
+| 10 | CHANNEL_CREATE | 채널 생성 (channel_id, freq, channel_name) |
+| 11 | CHANNEL_JOIN | 채널 참여 (ssrc, ufrag, sdp_offer) |
 | 12 | CHANNEL_LEAVE | 채널 나가기 |
 | 13 | CHANNEL_UPDATE | 채널 정보 수정 |
 | 14 | CHANNEL_DELETE | 채널 삭제 |
+| 15 | CHANNEL_LIST | 채널 목록 조회 |
+| 16 | CHANNEL_INFO | 채널 상세 조회 |
 | 20 | MESSAGE_CREATE | 채팅 메시지 전송 |
+| 30 | FLOOR_REQUEST | PTT 누름 — 발언권 요청 |
+| 31 | FLOOR_RELEASE | PTT 놓음 — 발언권 반납 |
+| 32 | FLOOR_PING | holder 생존 신호 (GRANTED 후 2초 주기 자율 전송) |
 
 ### Server → Client Opcodes
 
@@ -70,6 +119,13 @@ UDP (미디어 릴레이, net.rs — 구현 예정)
 | 4 | READY | IDENTIFY 성공, 세션 정보 전달 |
 | 100 | CHANNEL_EVENT | 채널 멤버 변동 브로드캐스트 (join/leave/update/delete) |
 | 101 | MESSAGE_EVENT | 채팅 메시지 브로드캐스트 |
+| 110 | FLOOR_GRANTED | 발언권 허가 (holder 본인에게만) |
+| 111 | FLOOR_DENY | 발언권 거부 |
+| 112 | FLOOR_TAKEN | 누군가 발언 중 (holder 제외 채널 전체 브로드캐스트) |
+| 113 | FLOOR_IDLE | 채널 유휴 상태 (채널 전체 브로드캐스트) |
+| 114 | FLOOR_REVOKE | 발언권 강제 회수 (preempted / ping_timeout / max_duration / disconnect) |
+| 115 | FLOOR_QUEUE_POS_INFO | 대기열 진입 확인 (position, size) |
+| 116 | FLOOR_PONG | FLOOR_PING 응답 |
 | 200 | ACK | 요청 성공 응답 |
 | 201 | ERROR | 에러 응답 (code + reason) |
 
@@ -87,42 +143,83 @@ UDP (미디어 릴레이, net.rs — 구현 예정)
 ## 연결 흐름
 
 ```
-클라이언트                       서버
-    │                             │
-    │◄── op:0 HELLO ──────────────│  heartbeat_interval 안내
-    │                             │
-    │─── op:3 IDENTIFY ──────────►│  user_id, token
-    │◄── op:4 READY ──────────────│  session_id 발급
-    │                             │
-    │─── op:10 CHANNEL_CREATE ───►│
-    │◄── op:200 ACK ──────────────│
-    │                             │
-    │─── op:11 CHANNEL_JOIN ─────►│  ssrc 포함
-    │◄── op:200 ACK ──────────────│  active_members 포함
-    │                             │
-    │─── op:20 MESSAGE_CREATE ───►│
-    │◄── op:101 MESSAGE_EVENT ────│  채널 전원 브로드캐스트
-    │                             │
-    │─── op:12 CHANNEL_LEAVE ────►│
-    │◄── op:200 ACK ──────────────│
-    │                             │
-    │─── [WS 종료] ───────────────│  자동 클린업
+클라이언트                           서버
+    │                                 │
+    │◄── op:0  HELLO ─────────────────│  heartbeat_interval 안내
+    │─── op:3  IDENTIFY ─────────────►│  user_id, token, priority
+    │◄── op:4  READY ─────────────────│  session_id 발급
+    │                                 │
+    │─── op:11 CHANNEL_JOIN ─────────►│  ssrc, ufrag, sdp_offer
+    │◄── op:200 ACK ──────────────────│  sdp_answer, active_members
+    │                                 │
+    │    [ICE + DTLS 핸드셰이크 — UDP] │
+    │◄══════════════════════════════► │
+    │                                 │
+    │─── op:30 FLOOR_REQUEST ────────►│  PTT 누름
+    │◄── op:110 FLOOR_GRANTED ────────│  발언권 허가 (본인)
+    │◄── op:112 FLOOR_TAKEN ──────────│  발언 중 알림 (다른 멤버)
+    │                                 │
+    │─── op:32 FLOOR_PING ───────────►│  2초 주기 생존 신호
+    │◄── op:116 FLOOR_PONG ───────────│  서버 응답
+    │                                 │
+    │─── op:31 FLOOR_RELEASE ────────►│  PTT 놓음
+    │◄── op:113 FLOOR_IDLE ───────────│  채널 유휴 (전체)
+    │                                 │
+    │─── op:12 CHANNEL_LEAVE ────────►│
+    │◄── op:200 ACK ──────────────────│
+    │─── [WS 종료] ───────────────────│  자동 클린업
 ```
 
 ---
 
-## 빌드 및 실행
+## Floor Control (MBCP TS 24.380 기반)
+
+채널별 발언권(Floor) 상태머신입니다.
+
+```
+G: Floor Idle
+    │ FLOOR_REQUEST
+    ▼
+G: Floor Taken ──── FLOOR_RELEASE ──────────────► G: Floor Idle (또는 다음 Queue Grant)
+    │
+    ├── FLOOR_REQUEST (高 priority / Emergency) ──► Preempt → G: Floor Taken (신규 holder)
+    ├── ping_timeout (6초 무응답) ────────────────► FLOOR_REVOKE → G: Floor Idle
+    └── max_duration (30초 초과) ─────────────────► FLOOR_REVOKE → G: Floor Idle
+```
+
+### Ping/Pong 생존 확인
+
+- holder가 `FLOOR_GRANTED` 수신 후 **2초 주기**로 `FLOOR_PING(op:32)` 자율 전송
+- 서버는 수신 즉시 `FLOOR_PONG(op:116)` 응답
+- 서버가 **6초** 이상 Ping을 못 받으면 `FLOOR_REVOKE(ping_timeout)` 발송
+
+### 우선순위 (priority)
+
+| 값 | 의미 |
+|---|---|
+| 255 | Emergency — priority 무관 즉시 Preempt |
+| 200 | Imminent Peril |
+| 100 | 일반 기본값 |
+
+---
+
+## 사전 생성 채널
+
+서버 시작 시 아래 5개 채널이 자동으로 생성됩니다.
+
+| channel_id | freq | name | 정원 |
+|---|---|---|---|
+| CH_0001 | 0001 | 🎯 작전지휘 | 10 |
+| CH_0112 | 0112 | 🔴 긴급대응 | 5 |
+| CH_0305 | 0305 | 🛡️ 경계근무 | 8 |
+| CH_0420 | 0420 | 🚁 항공지원 | 6 |
+| CH_0911 | 0911 | 📡 상황보고 | 20 |
+
+---
+
+## 테스트
 
 ```bash
-# 빌드
-cargo build
-
-# 서버 실행
-RUST_LOG=info cargo run
-
-# 트레이스 로깅과 함께 실행
-RUST_LOG=trace cargo run
-
 # 전체 테스트
 cargo test
 
@@ -142,10 +239,18 @@ cargo test --test integration_test
 | WS 시그널링 프로토콜 | ✅ 완료 |
 | 브로드캐스트 (채팅/이벤트) | ✅ 완료 |
 | 상태 관리 3계층 | ✅ 완료 |
-| UDP 미디어 릴레이 (RTP 평문) | ✅ 완료 |
-| 좀비 세션 자동 종료 태스크 | ✅ 완료 |
-| IDENTIFY 토큰 검증 (Secret Key) | ✅ 완료 |
-| SRTP 암복호화 Phase 2 | 🔲 클라이언트 준비 후 예정 |
+| IDENTIFY 토큰 검증 | ✅ 완료 |
+| CLI 인자 (--port / --udp-port / --advertise-ip) | ✅ 완료 |
+| SDP offer/answer 교환 (CHANNEL_JOIN) | ✅ 완료 |
+| ICE Lite + STUN Binding | ✅ 완료 |
+| DTLS 핸드셰이크 + keying material 추출 | ✅ 완료 |
+| SRTP 암복호화 (webrtc-srtp) | ✅ 완료 |
+| UDP 미디어 릴레이 + Floor 게이트 | ✅ 완료 |
+| Floor Control (MBCP TS 24.380) | ✅ 완료 |
+| 좀비 세션/피어 자동 종료 | ✅ 완료 |
+| 사전 정의 채널 자동 생성 | ✅ 완료 |
+| STUN keepalive 핫패스 최적화 | ✅ 완료 |
+| net.rs SO_REUSEPORT + recvmmsg | 🔲 부하 테스트 후 적용 예정 |
 
 ---
 
