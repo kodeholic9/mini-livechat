@@ -47,6 +47,12 @@ pub async fn run_server() {
         Arc::clone(&dtls_session_map),
     ));
 
+    // Floor Ping 태스크 (Floor Taken 상태에서 holder 생존 확인)
+    tokio::spawn(crate::protocol::floor::run_floor_ping_task(
+        Arc::clone(&user_hub),
+        Arc::clone(&channel_hub),
+    ));
+
     // 좀비 세션 자동 종료 태스크
     tokio::spawn(run_zombie_reaper(
         Arc::clone(&user_hub),

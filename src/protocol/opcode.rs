@@ -24,6 +24,14 @@ pub mod client {
 
     /// 채팅 메시지 전송
     pub const MESSAGE_CREATE: u8 = 20;
+
+    // --- Floor Control (MBCP TS 24.380) ---
+    /// PTT 누름 — 발언권 요청
+    pub const FLOOR_REQUEST: u8 = 30;
+    /// PTT 놓음 — 발언권 반납
+    pub const FLOOR_RELEASE: u8 = 31;
+    /// Floor Ping 응답 — 서버 Ping에 대한 생존 응답
+    pub const FLOOR_PONG:    u8 = 32;
 }
 
 /// Server → Client opcodes
@@ -44,4 +52,20 @@ pub mod server {
     pub const ACK:             u8 = 200;
     /// 에러 응답
     pub const ERROR:           u8 = 201;
+
+    // --- Floor Control (MBCP TS 24.380) ---
+    /// 발언권 허가
+    pub const FLOOR_GRANTED:        u8 = 110;
+    /// 발언권 거부
+    pub const FLOOR_DENY:           u8 = 111;
+    /// 소속 채널에 누군가 발언 중 브로드캐스트
+    pub const FLOOR_TAKEN:          u8 = 112;
+    /// 채널이 유휴 상태임을 다운 안이운 동안 업데이트
+    pub const FLOOR_IDLE:           u8 = 113;
+    /// 발언권 강제 회수 (Preemption 또는 타임아웃)
+    pub const FLOOR_REVOKE:         u8 = 114;
+    /// 대기열 등록 확인 — Floor Deny 대신 대기열 진입 시 사용
+    pub const FLOOR_QUEUE_POS_INFO: u8 = 115;
+    /// 서버 → holder 생존 확인
+    pub const FLOOR_PING:           u8 = 116;
 }

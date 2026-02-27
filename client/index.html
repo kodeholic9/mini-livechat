@@ -552,6 +552,16 @@
             id="token"
             value="changeme-secret"
             placeholder="token"
+            style="margin-bottom: 6px"
+          />
+          <input
+            type="number"
+            id="priority"
+            value="100"
+            min="0"
+            max="255"
+            placeholder="priority (0-255)"
+            title="Floor Control 우선순위 — 높을수록 우선 (Emergency=255)"
           />
         </div>
 
@@ -672,6 +682,25 @@
             <span class="state-key">SRTP</span>
             <span class="state-val" id="s-srtp">—</span>
           </div>
+          <div
+            class="state-row"
+            style="
+              border-top: 1px solid var(--border);
+              margin-top: 6px;
+              padding-top: 6px;
+            "
+          >
+            <span class="state-key">FLOOR</span>
+            <span class="state-val" id="s-floor">IDLE</span>
+          </div>
+          <div class="state-row">
+            <span class="state-key">HOLDER</span>
+            <span class="state-val" id="s-holder">—</span>
+          </div>
+          <div class="state-row">
+            <span class="state-key">QUEUE</span>
+            <span class="state-val" id="s-queue">—</span>
+          </div>
         </div>
 
         <div class="panel-title" style="border-top: none">// members</div>
@@ -698,6 +727,9 @@
         channel: null,
         ready: false,
         pttActive: false,
+        floorState: 'idle', // 'idle' | 'taken' | 'requesting' | 'queued'
+        floorHolder: null, // 현재 발언 중인 user_id
+        floorPingSeq: null, // 서버에서 받은 최신 ping seq
       };
 
       const $ = (id) => document.getElementById(id);
@@ -826,6 +858,28 @@
             break;
           case 201:
             onError(pkt.d);
+            break;
+          // Floor Control (MBCP TS 24.380)
+          case 110:
+            onFloorGranted(pkt.d);
+            break;
+          case 111:
+            onFloorDeny(pkt.d);
+            break;
+          case 112:
+            onFloorTaken(pkt.d);
+            break;
+          case 113:
+            onFloorIdle(pkt.d);
+            break;
+          case 114:
+            onFloorRevoke(pkt.d);
+            break;
+          case 115:
+            onFloorQueuePos(pkt.d);
+            break;
+          case 116:
+            onFloorPing(pkt.d);
             break;
         }
       }
@@ -1029,22 +1083,162 @@
       }
 
       // ============================================================
-      // PTT
+      // PTT + Floor Control (MBCP TS 24.380)
       // ============================================================
+
+      // PTT 누름 → FLOOR_REQUEST (op:30)
       function pttStart() {
-        if (!state.stream || state.pttActive) return;
+        if (!state.stream || state.pttActive || !state.channel) return;
+        if (
+          state.floorState === 'taken' &&
+          state.floorHolder !== state.userId
+        ) {
+          // 발언 중인 타 사용자 있음 → 그래도 요청 (우선순위/Emergency로 선점 가능)
+        }
         state.pttActive = true;
+        state.floorState = 'requesting';
         $('ptt-btn').classList.add('active');
-        $('ptt-btn').textContent = '● TRANSMITTING';
-        state.stream.getAudioTracks().forEach((t) => (t.enabled = true));
+        $('ptt-btn').textContent = '● REQUESTING…';
+        wsSend({
+          op: 30,
+          d: {
+            channel_id: state.channel,
+            priority: parseInt($('priority').value, 10) || 100,
+            indicator: 'normal',
+          },
+        });
       }
 
+      // PTT 놓음 → FLOOR_RELEASE (op:31)
       function pttStop() {
         if (!state.pttActive) return;
         state.pttActive = false;
+        if (
+          state.floorState === 'taken' &&
+          state.floorHolder === state.userId
+        ) {
+          wsSend({ op: 31, d: { channel_id: state.channel } });
+        }
+        // 오디오는 서버 응답(FLOOR_GRANTED/REVOKE/IDLE) 수신 후 비활성화
+        // 단, requesting 중 취소한 경우 즉시 비활성화
+        if (state.floorState === 'requesting') {
+          state.stream?.getAudioTracks().forEach((t) => (t.enabled = false));
+          _resetFloorUI();
+        }
+      }
+
+      // ── Floor 이벤트 핸들러 ──
+
+      // S→C: FLOOR_GRANTED (110) — 발언권 허가 (본인)
+      function onFloorGranted(d) {
+        state.floorState = 'taken';
+        state.floorHolder = d.user_id;
+        state.userId = state.userId || d.user_id;
+        setState('floor', 'TAKEN', 'ok');
+        setState('holder', d.user_id, 'ok');
+        setState('queue', '—');
+        log(
+          'sys',
+          `FLOOR_GRANTED — ${d.user_id} (max ${(d.duration / 1000).toFixed(0)}s)`,
+          'ok',
+        );
+        if (d.user_id === $('user-id').value.trim()) {
+          // 본인 발언권 — 오디오 활성화
+          state.stream?.getAudioTracks().forEach((t) => (t.enabled = true));
+          $('ptt-btn').textContent = '● TRANSMITTING';
+          $('ptt-btn').classList.add('active');
+        }
+      }
+
+      // S→C: FLOOR_DENY (111) — 거부 (현재는 대기열 없는 경우에만 발생)
+      function onFloorDeny(d) {
+        state.pttActive = false;
+        state.floorState = 'idle';
+        setState('floor', 'IDLE');
+        setState('queue', '—');
+        state.stream?.getAudioTracks().forEach((t) => (t.enabled = false));
         $('ptt-btn').classList.remove('active');
         $('ptt-btn').textContent = '● PUSH TO TALK';
+        log('sys', `FLOOR_DENY — ${d.reason}`, 'err');
+      }
+
+      // S→C: FLOOR_TAKEN (112) — 채널 브로드캐스트, 누군가 발언 중
+      function onFloorTaken(d) {
+        state.floorHolder = d.user_id;
+        if (d.user_id !== $('user-id').value.trim()) {
+          state.floorState = 'taken';
+          setState('floor', 'TAKEN', 'warn');
+          setState('holder', d.user_id, 'warn');
+        }
+        // 멤버 UI 발언 표시
+        _setMemberSpeaking(d.user_id, true);
+        log('sys', `FLOOR_TAKEN — ${d.user_id} [${d.indicator}]`);
+      }
+
+      // S→C: FLOOR_IDLE (113) — 채널 브로드캐스트, 발언권 없음
+      function onFloorIdle(d) {
+        const prevHolder = state.floorHolder;
+        state.floorState = 'idle';
+        state.floorHolder = null;
+        setState('floor', 'IDLE');
+        setState('holder', '—');
+        setState('queue', '—');
+        if (prevHolder) _setMemberSpeaking(prevHolder, false);
+        log('sys', `FLOOR_IDLE — ${d.channel_id}`);
+      }
+
+      // S→C: FLOOR_REVOKE (114) — 발언권 강제 회수
+      function onFloorRevoke(d) {
+        const wasMine = state.floorHolder === $('user-id').value.trim();
+        state.pttActive = false;
+        state.floorState = 'idle';
         state.stream?.getAudioTracks().forEach((t) => (t.enabled = false));
+        _resetFloorUI();
+        if (wasMine) {
+          log('sys', `FLOOR_REVOKE — cause: ${d.cause}`, 'err');
+        }
+      }
+
+      // S→C: FLOOR_QUEUE_POS_INFO (115) — 대기열 진입
+      function onFloorQueuePos(d) {
+        state.floorState = 'queued';
+        setState('floor', 'QUEUED', 'warn');
+        setState('queue', `${d.queue_position}/${d.queue_size}`);
+        $('ptt-btn').textContent = `● QUEUE ${d.queue_position}`;
+        log('sys', `FLOOR_QUEUE — pos ${d.queue_position}/${d.queue_size}`);
+      }
+
+      // S→C: FLOOR_PING (116) — holder 생존 확인, 즉시 Pong 응답
+      function onFloorPing(d) {
+        state.floorPingSeq = d.seq;
+        wsSend({ op: 32, d: { channel_id: d.channel_id, seq: d.seq } });
+        // 무음 전송 방지 — 오디오 트랙이 활성화 상태인지 확인
+        if (state.floorHolder === $('user-id').value.trim()) {
+          const active = state.stream?.getAudioTracks().some((t) => t.enabled);
+          if (!active) {
+            state.stream?.getAudioTracks().forEach((t) => (t.enabled = true));
+          }
+        }
+      }
+
+      // 내부 유틸
+      function _resetFloorUI() {
+        const prev = state.floorHolder;
+        if (prev) _setMemberSpeaking(prev, false);
+        $('ptt-btn').classList.remove('active');
+        $('ptt-btn').textContent = '● PUSH TO TALK';
+        setState('floor', 'IDLE');
+        setState('holder', '—');
+        setState('queue', '—');
+      }
+
+      function _setMemberSpeaking(userId, isSpeaking) {
+        const el = document.getElementById(`spk-${userId}`);
+        if (!el) return;
+        el.textContent = isSpeaking ? '▶ ON AIR' : '';
+        el.style.color = 'var(--accent)';
+        el.style.fontSize = '9px';
+        el.style.fontFamily = 'var(--mono)';
       }
 
       // ============================================================
@@ -1096,11 +1290,16 @@
         } else if (mode === 'ready') {
           d('btn-create', false);
           d('btn-join', false);
+          d('ptt-btn', true);
+          d('btn-leave', true);
+          d('btn-send', true);
+          $('chat-input').disabled = true;
         } else if (mode === 'joined') {
           d('btn-join', true);
           d('btn-leave', false);
           d('btn-send', false);
           $('chat-input').disabled = false;
+          d('ptt-btn', false);
         }
       }
 
@@ -1132,6 +1331,7 @@
           d: {
             user_id: $('user-id').value.trim(),
             token: $('token').value.trim(),
+            priority: parseInt($('priority').value, 10) || 100,
           },
         });
       };
@@ -1172,6 +1372,10 @@
         $('member-list').innerHTML = '';
         $('sdp-viewer').textContent = '—';
         pttStop();
+        // Floor 상태 초기화
+        state.floorState = 'idle';
+        state.floorHolder = null;
+        _resetFloorUI();
         state.pc?.close();
         state.pc = null;
         setButtons('ready');

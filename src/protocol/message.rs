@@ -7,15 +7,9 @@ use serde::{Deserialize, Serialize};
 // ----------------------------------------------------------------------------
 
 /// 모든 WebSocket 메시지의 최상위 구조체
-/// 수신/송신 공통으로 사용하며, payload는 op에 따라 해석합니다.
-///
-/// 예시:
-///   { "op": 11, "d": { "channel_id": "CH_001", "ssrc": 12345 } }
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GatewayPacket {
-    /// opcode (protocol::opcode 참조)
     pub op: u8,
-    /// payload. op에 따라 구조가 달라지므로 raw JSON으로 보관
     pub d: Option<serde_json::Value>,
 }
 
@@ -26,8 +20,9 @@ pub struct GatewayPacket {
 /// op: IDENTIFY (3)
 #[derive(Deserialize, Debug)]
 pub struct IdentifyPayload {
-    pub user_id: String,
-    pub token:   String,
+    pub user_id:  String,
+    pub token:    String,
+    pub priority: Option<u8>,  // Floor Control 우선순위 (없으면 FLOOR_PRIORITY_DEFAULT)
 }
 
 /// op: CHANNEL_CREATE (10)
@@ -41,9 +36,9 @@ pub struct ChannelCreatePayload {
 #[derive(Deserialize, Debug)]
 pub struct ChannelJoinPayload {
     pub channel_id: String,
-    pub ssrc:       u32,              // audio 트랙 기본 ssrc (클라이언트가 생성)
-    pub ufrag:      String,           // ICE ufrag
-    pub sdp_offer:  Option<String>,   // WebRTC SDP offer (있으면 answer 생성)
+    pub ssrc:       u32,
+    pub ufrag:      String,
+    pub sdp_offer:  Option<String>,
 }
 
 /// op: CHANNEL_LEAVE (12)
@@ -76,45 +71,43 @@ pub struct MessageCreatePayload {
 // [S→C] 서버 응답 payload 타입들
 // ----------------------------------------------------------------------------
 
-/// op: HELLO (0) — 연결 직후 heartbeat 주기 안내
+/// op: HELLO (0)
 #[derive(Serialize, Debug)]
 pub struct HelloPayload {
     pub heartbeat_interval: u64,
 }
 
-/// op: READY (4) — IDENTIFY 성공 응답
+/// op: READY (4)
 #[derive(Serialize, Debug)]
 pub struct ReadyPayload {
     pub session_id: String,
     pub user_id:    String,
 }
 
-/// op: ACK (200) — 요청 성공 응답
-/// data는 op마다 다르므로 raw Value 사용
+/// op: ACK (200)
 #[derive(Serialize, Debug)]
 pub struct AckPayload {
     pub op:   u8,
     pub data: serde_json::Value,
 }
 
-/// op: ACK > CHANNEL_JOIN 성공 시 data 내용
+/// op: ACK > CHANNEL_JOIN 성공 시 data
 #[derive(Serialize, Debug)]
 pub struct ChannelJoinAckData {
     pub channel_id:     String,
-    pub sdp_answer:     Option<String>,  // SDP offer가 있었을 때만 포함
+    pub sdp_answer:     Option<String>,
     pub active_members: Vec<MemberInfo>,
 }
 
-/// op: CHANNEL_EVENT (100) — 채널 멤버 변동 브로드캐스트
+/// op: CHANNEL_EVENT (100)
 #[derive(Serialize, Debug)]
 pub struct ChannelEventPayload {
-    /// "join" | "leave" | "update"
     pub event:      String,
     pub channel_id: String,
     pub member:     MemberInfo,
 }
 
-/// op: MESSAGE_EVENT (101) — 채팅 메시지 브로드캐스트
+/// op: MESSAGE_EVENT (101)
 #[derive(Serialize, Debug)]
 pub struct MessageEventPayload {
     pub message_id: String,
@@ -131,7 +124,7 @@ pub struct ErrorPayload {
     pub reason: String,
 }
 
-/// op: ACK > CHANNEL_LIST 응답 아이템
+/// op: ACK > CHANNEL_LIST
 #[derive(Serialize, Debug)]
 pub struct ChannelSummary {
     pub channel_id:   String,
@@ -140,7 +133,7 @@ pub struct ChannelSummary {
     pub created_at:   u64,
 }
 
-/// op: ACK > CHANNEL_INFO 응답
+/// op: ACK > CHANNEL_INFO
 #[derive(Serialize, Debug)]
 pub struct ChannelInfoData {
     pub channel_id:   String,
@@ -174,4 +167,90 @@ impl GatewayPacket {
     pub fn no_data(op: u8) -> Self {
         Self { op, d: None }
     }
+}
+
+// ----------------------------------------------------------------------------
+// [Floor Control] MBCP TS 24.380 payload 타입
+// ----------------------------------------------------------------------------
+
+/// Floor Indicator — 발언의 성격 (직렬화용)
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum FloorIndicatorDto {
+    Normal,
+    Broadcast,
+    ImminentPeril,
+    Emergency,
+}
+
+/// op: FLOOR_REQUEST (30) — C→S, PTT 누름
+#[derive(Deserialize, Debug)]
+pub struct FloorRequestPayload {
+    pub channel_id: String,
+    pub priority:   Option<u8>,
+    pub indicator:  Option<FloorIndicatorDto>,
+}
+
+/// op: FLOOR_RELEASE (31) — C→S, PTT 놓음
+#[derive(Deserialize, Debug)]
+pub struct FloorReleasePayload {
+    pub channel_id: String,
+}
+
+/// op: FLOOR_PONG (32) — C→S, Floor Ping 응답
+#[derive(Deserialize, Debug)]
+pub struct FloorPongPayload {
+    pub channel_id: String,
+    pub seq:        u32,
+}
+
+/// op: FLOOR_GRANTED (110) — S→C, 발언권 허가
+#[derive(Serialize, Debug)]
+pub struct FloorGrantedPayload {
+    pub channel_id: String,
+    pub user_id:    String,
+    pub duration:   u64,   // 최대 발언 가능 시간 ms
+}
+
+/// op: FLOOR_DENY (111) — S→C, 발언권 거부
+#[derive(Serialize, Debug)]
+pub struct FloorDenyPayload {
+    pub channel_id: String,
+    pub reason:     String,
+}
+
+/// op: FLOOR_TAKEN (112) — S→C 브로드캐스트, 누군가 발언 중
+#[derive(Serialize, Debug)]
+pub struct FloorTakenPayload {
+    pub channel_id: String,
+    pub user_id:    String,
+    pub indicator:  FloorIndicatorDto,
+}
+
+/// op: FLOOR_IDLE (113) — S→C 브로드캐스트, 발언권 없음
+#[derive(Serialize, Debug)]
+pub struct FloorIdlePayload {
+    pub channel_id: String,
+}
+
+/// op: FLOOR_REVOKE (114) — S→C, 발언권 강제 회수
+#[derive(Serialize, Debug)]
+pub struct FloorRevokePayload {
+    pub channel_id: String,
+    pub cause:      String,  // "preempted" | "timeout" | "max_duration" | "disconnect"
+}
+
+/// op: FLOOR_QUEUE_POS_INFO (115) — S→C, 대기열 진입 확인
+#[derive(Serialize, Debug)]
+pub struct FloorQueuePosInfoPayload {
+    pub channel_id:     String,
+    pub queue_position: usize,
+    pub queue_size:     usize,
+}
+
+/// op: FLOOR_PING (116) — S→C, holder 생존 확인
+#[derive(Serialize, Debug)]
+pub struct FloorPingPayload {
+    pub channel_id: String,
+    pub seq:        u32,
 }

@@ -32,3 +32,31 @@ pub const MAX_MESSAGE_LENGTH: usize = 2_000;
 /// IDENTIFY 토큰 검증용 Secret Key
 /// 운영 환경에서는 환경변수 LIVECHAT_SECRET 으로 오버라이드 할 것
 pub const DEFAULT_SECRET_KEY: &str = "changeme-secret";
+
+// ----------------------------------------------------------------------------
+// Floor Control (MBCP TS 24.380 기반)
+// ----------------------------------------------------------------------------
+
+/// Floor Ping 송신 주기 — Floor Taken 상태에서 서버가 holder에게 보내는 생존 확인 (3초)
+pub const FLOOR_PING_INTERVAL_MS: u64 = 3_000;
+
+/// Floor Pong 응답 대기 시간 — 이 시간 안에 Pong 없으면 Floor Revoke (5초)
+pub const FLOOR_PONG_TIMEOUT_MS: u64 = 5_000;
+
+/// 최대 발언 점유 시간 — Emergency 포함 무조건 Revoke (30초)
+pub const FLOOR_MAX_TAKEN_MS: u64 = 30_000;
+
+/// Floor Request 응답 대기 타이머 T101 (3초)
+pub const FLOOR_T101_MS: u64 = 3_000;
+
+/// Floor Release 응답 대기 타이머 T100 (3초)
+pub const FLOOR_T100_MS: u64 = 3_000;
+
+/// 발언권 우선순위 — Emergency 고정값 (최고)
+pub const FLOOR_PRIORITY_EMERGENCY: u8 = 255;
+
+/// 발언권 우선순위 — Imminent Peril 고정값
+pub const FLOOR_PRIORITY_IMMINENT_PERIL: u8 = 200;
+
+/// 발언권 우선순위 — 일반 기본값
+pub const FLOOR_PRIORITY_DEFAULT: u8 = 100;

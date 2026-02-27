@@ -89,6 +89,81 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.13.0] - 2026-02-27
+
+### Floor Control 구현 (MBCP TS 24.380 기반)
+
+#### config.rs
+- Floor Control 전용 상수 추가
+  - `FLOOR_PING_INTERVAL_MS = 3_000` — 서버→holder Ping 주기
+  - `FLOOR_PONG_TIMEOUT_MS = 5_000` — Pong 무응답 시 Revoke 기준
+  - `FLOOR_MAX_TAKEN_MS = 30_000` — 최대 발언 점유 시간
+  - `FLOOR_T100_MS`, `FLOOR_T101_MS = 3_000` — MBCP 타이머
+  - `FLOOR_PRIORITY_EMERGENCY = 255`, `FLOOR_PRIORITY_IMMINENT_PERIL = 200`, `FLOOR_PRIORITY_DEFAULT = 100`
+
+#### protocol/opcode.rs
+- C→S opcode 추가: `FLOOR_REQUEST(30)`, `FLOOR_RELEASE(31)`, `FLOOR_PONG(32)`
+- S→C opcode 추가: `FLOOR_GRANTED(110)`, `FLOOR_DENY(111)`, `FLOOR_TAKEN(112)`, `FLOOR_IDLE(113)`, `FLOOR_REVOKE(114)`, `FLOOR_QUEUE_POS_INFO(115)`, `FLOOR_PING(116)`
+
+#### core.rs
+- `User`에 `priority: u8` 필드 추가
+- `UserHub::register()` 시그니처에 `priority: u8` 파라미터 추가
+- `Channel`에 `floor: Mutex<FloorControl>` 필드 추가
+- `FloorIndicator` enum 추가 (Normal / Broadcast / ImminentPeril / Emergency)
+- `FloorControlState` enum 추가 (Idle / Taken)
+- `FloorQueueEntry` 구조체 추가 (user_id, priority, indicator, queued_at)
+- `FloorControl` 구조체 추가
+  - `grant()` — 발언권 부여, 상태 Taken으로 전이
+  - `clear_taken()` — Idle 복귀 공통 처리
+  - `enqueue()` — priority 내림차순 삽입, 중복 user_id 갱신
+  - `dequeue_next()` — 다음 대기자 꺼내기
+  - `remove_from_queue()` — CHANNEL_LEAVE 등 연동
+  - `can_preempt()` — Emergency는 무조건 true, 그 외 priority 비교
+  - `next_ping_seq()` / `on_pong()` — Ping/Pong seq 관리
+  - `is_pong_timeout()` / `is_max_taken_exceeded()` — 타임아웃 판정
+
+#### protocol/message.rs
+- `IdentifyPayload`에 `priority: Option<u8>` 추가
+- Floor payload 타입 10개 추가
+  - C→S: `FloorRequestPayload`, `FloorReleasePayload`, `FloorPongPayload`
+  - S→C: `FloorGrantedPayload`, `FloorDenyPayload`, `FloorTakenPayload`, `FloorIdlePayload`, `FloorRevokePayload`, `FloorQueuePosInfoPayload`, `FloorPingPayload`
+  - 공용: `FloorIndicatorDto` enum (serde rename_all = snake_case)
+
+#### protocol/floor.rs (신규)
+- Floor Control 도메인 로직 분리 (protocol.rs에서 독립)
+- `handle_floor_request()` — Idle 즉시 Grant / Taken 시 Preemption 또는 Queue 진입
+- `handle_floor_release()` — holder 검증 후 다음 후보 Grant 또는 Idle
+- `handle_floor_pong()` — seq 검증 후 last_pong_at 갱신
+- `run_floor_ping_task()` — 3초 주기 태스크, 최대발언시간/Pong타임아웃 감시
+- `on_user_disconnect()` — 연결 종료 시 holder Revoke + 대기열 제거
+- `decide_next()` (sync) — MutexGuard 보유 중 패킷 생성, Vec 반환
+- `dispatch_packets()` (async) — lock 해제 후 패킷 전송
+- **Send 안전 패턴**: `enum Action` / `decide_next` 로 MutexGuard를 await 포인트 이전에 drop
+
+#### protocol/protocol.rs
+- IDENTIFY 핸들러: `priority` 추출 후 `user_hub.register()` 전달
+- `handle_floor_request/release/pong` dispatch 연결
+- `cleanup()`: `on_user_disconnect()` 호출 추가
+
+#### protocol.rs (mod)
+- `pub mod floor` 추가
+
+#### lib.rs
+- `run_floor_ping_task` tokio::spawn 추가
+
+#### client/index.html
+- IDENTIFY 폼에 `priority` 입력 추가 (0~255, 기본 100)
+- PTT 버튼: 오디오 트랙 즉시 활성화 → FLOOR_REQUEST/RELEASE WS 송신으로 교체
+- Floor 수신 핸들러 추가: GRANTED/DENY/TAKEN/IDLE/REVOKE/QUEUE_POS/PING 7종
+- FLOOR_PING 수신 시 자동 FLOOR_PONG 응답
+- 오디오 트랙 활성화 시점: FLOOR_GRANTED 수신 시 (이전: PTT 누름 즉시)
+- State 패널에 FLOOR/HOLDER/QUEUE 3행 추가
+- 멤버 항목에 `▶ ON AIR` 배지 — FLOOR_TAKEN 수신 시 표시
+- `setButtons('joined')`: ptt-btn 활성화 추가
+- leave 처리에 Floor 상태 초기화 추가
+
+---
+
 ## [0.12.0] - 2026-02-27
 
 ### 브라우저 E2E ICE+DTLS 연결 성공
@@ -128,8 +203,39 @@ All notable changes to this project will be documented in this file.
 - SRTP 패킷 수신: Opus 73bytes @ 20ms 간격 ✅
 
 ## [TODO] (다음 세션)
-- SRTP 복호화 키 설치 (DTLS keying material → SrtpContext)
-- 복호화 후 채널 내 다른 피어로 릴레이
+
+### 즉시 해야 할 것 — `cargo build` 통과 확인
+- [ ] `cargo build` 실행 후 컴파일 에러 없는지 확인
+- [ ] warning 정리 (미사용 변수, dead_code 등)
+
+### E2E 시나리오 테스트 (브라우저 2탭)
+- [ ] 탭A IDENTIFY(priority=100) + JOIN → 탭B IDENTIFY(priority=100) + JOIN
+- [ ] 탭A PTT 누름 → FLOOR_GRANTED 수신 확인 / 탭B FLOOR_TAKEN 수신 확인
+- [ ] 탭A PTT 놓음 → 탭A FLOOR_IDLE 수신 / 탭B FLOOR_IDLE 수신
+- [ ] 탭A 발언 중 탭B PTT → FLOOR_QUEUE_POS_INFO 수신 확인
+- [ ] 탭B priority=255(Emergency) → 탭A Preemption Revoke 확인
+- [ ] 30초 초과 → 서버에서 자동 FLOOR_REVOKE(max_duration) 확인
+- [ ] 탭A 강제 닫기 → FLOOR_REVOKE(timeout or disconnect) + 탭B Grant 확인
+
+### 통합 테스트 (integration_test.rs)
+- [ ] Floor Request → Granted 시나리오
+- [ ] Queue → 선행자 Release 후 자동 Grant 시나리오
+- [ ] Preemption (Emergency) 시나리오
+- [ ] Disconnect Revoke 시나리오
+
+### net.rs 성능 개선 (메모리에 있음)
+- [ ] `try_recv_from` mut 수정 선행
+- [ ] `Iterator` lifetime 보강 (`Bytes::copy`)
+- [ ] `num_cpus` 도입
+- [ ] `DashMap` 전환 검토
+- [ ] `SO_REUSEPORT` + `recvmmsg` 적용
+- [ ] 부하 테스트 후 병목 확인 후 적용
+
+### SRTP 릴레이 (Phase 1)
+- [ ] DTLS keying material → `SrtpContext` 키 설치 (0.8.0 구현 확인 필요)
+- [ ] 복호화된 RTP → 채널 내 다른 피어 relay
+- [ ] Floor Taken 상태일 때만 릴레이 (holder → others)
+- [ ] Floor Idle 상태에서 수신된 RTP는 drop 또는 버퍼
 
 ---
 

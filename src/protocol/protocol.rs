@@ -14,6 +14,7 @@ use crate::core::{ChannelHub, MediaPeerHub, UserHub};
 use crate::error::LiveError;
 use crate::protocol::{
     error_code::to_error_code,
+    floor,
     message::{
         AckPayload, ChannelCreatePayload, ChannelDeletePayload, ChannelEventPayload,
         ChannelInfoData, ChannelJoinAckData, ChannelJoinPayload, ChannelLeavePayload,
@@ -136,6 +137,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             client::CHANNEL_LIST   => handle_channel_list(&broadcast_tx, &state).await,
             client::CHANNEL_INFO   => handle_channel_info(&broadcast_tx, &state, packet).await,
             client::MESSAGE_CREATE => handle_message_create(&broadcast_tx, &session, &state, packet).await,
+            client::FLOOR_REQUEST   => floor::handle_floor_request(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.user_hub, &state.channel_hub, packet).await,
+            client::FLOOR_RELEASE   => floor::handle_floor_release(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.user_hub, &state.channel_hub, packet).await,
+            client::FLOOR_PONG      => floor::handle_floor_pong(session.user_id.as_deref().unwrap(), &state.channel_hub, packet).await,
             unknown => {
                 warn!("알 수 없는 opcode: {}", unknown);
                 send(&broadcast_tx, error_packet(LiveError::InvalidOpcode(unknown))).await
@@ -177,7 +181,8 @@ async fn handle_identify(
         return send(tx, error_packet(LiveError::InvalidToken)).await;
     }
 
-    state.user_hub.register(&payload.user_id, tx.clone());
+    let priority = payload.priority.unwrap_or(config::FLOOR_PRIORITY_DEFAULT);
+    state.user_hub.register(&payload.user_id, tx.clone(), priority);
     session.user_id = Some(payload.user_id.clone());
 
     send(tx, make_packet(server::READY, ReadyPayload {
@@ -674,6 +679,9 @@ async fn cleanup(session: &mut Session, state: &AppState) {
         }
 
         state.media_peer_hub.remove(&ufrag);
+
+        // Floor Control 정리 (holder면 Revoke, 대기열이면 제거)
+        floor::on_user_disconnect(&user_id, &channel_id, &state.user_hub, &state.channel_hub).await;
     }
 
     state.user_hub.unregister(&user_id);

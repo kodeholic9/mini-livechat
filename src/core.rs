@@ -1,13 +1,14 @@
 // author: kodeholic (powered by Claude)
 // 네트워크 로직과 철저히 분리된, 순수 비즈니스 상태 관리 모듈입니다.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tracing::{trace, warn};
 
+use crate::config;
 use crate::error::{LiveError, LiveResult};
 use crate::media::srtp::SrtpContext;
 use crate::utils::current_timestamp;
@@ -23,13 +24,15 @@ pub type BroadcastTx = mpsc::Sender<String>;
 pub struct User {
     pub tx:        BroadcastTx,
     pub last_seen: AtomicU64,   // 마지막 메시지 수신 시간 (좀비 세션 감지용)
+    pub priority:  u8,          // Floor Control 우선순위 (MBCP, 높을수록 우선)
 }
 
 impl User {
-    pub fn new(tx: BroadcastTx) -> Self {
+    pub fn new(tx: BroadcastTx, priority: u8) -> Self {
         Self {
             tx,
             last_seen: AtomicU64::new(current_timestamp()),
+            priority,
         }
     }
 
@@ -48,8 +51,8 @@ impl UserHub {
         Self { users: RwLock::new(HashMap::new()) }
     }
 
-    pub fn register(&self, user_id: &str, tx: BroadcastTx) -> Arc<User> {
-        let user = Arc::new(User::new(tx));
+    pub fn register(&self, user_id: &str, tx: BroadcastTx, priority: u8) -> Arc<User> {
+        let user = Arc::new(User::new(tx, priority));
         self.users.write().unwrap().insert(user_id.to_string(), Arc::clone(&user));
         trace!("User registered: {}", user_id);
         user
@@ -102,6 +105,7 @@ pub struct Channel {
     pub capacity:   usize,
     pub created_at: u64,
     pub members:    RwLock<HashSet<String>>,    // user_id
+    pub floor:      Mutex<FloorControl>,        // MBCP Floor Control 상태
 }
 
 impl Channel {
@@ -112,6 +116,7 @@ impl Channel {
             capacity,
             created_at: current_timestamp(),
             members:    RwLock::new(HashSet::new()),
+            floor:      Mutex::new(FloorControl::new()),
         }
     }
 
@@ -139,6 +144,160 @@ impl Channel {
 
     pub fn member_count(&self) -> usize {
         self.members.read().unwrap().len()
+    }
+}
+
+// ----------------------------------------------------------------------------
+// [FloorControl] MBCP TS 24.380 기반 Floor Control 상태 관리
+// Channel당 1개 인스턴스, Channel.floor(Mutex)로 보호
+// ----------------------------------------------------------------------------
+
+/// Floor 표시자 — 발언의 성격/우선순위를 나타냄 (MBCP Floor Indicator)
+#[derive(Debug, Clone, PartialEq)]
+pub enum FloorIndicator {
+    Normal,        // 일반 발언
+    Broadcast,     // 단방향 방송 (청취자 응답 없음)
+    ImminentPeril, // 임박한 위험 — 일반보다 높은 우선순위
+    Emergency,     // 긴급 — 최고 우선순위, priority 무관 즉시 Preempt
+}
+
+/// Floor Control 서버 상태머신 (MBCP G: 상태)
+#[derive(Debug, Clone, PartialEq)]
+pub enum FloorControlState {
+    Idle,  // G: Floor Idle  — 발언권 없음
+    Taken, // G: Floor Taken — 발언권 점유 중
+}
+
+/// 대기열 항목 — Floor Request가 Deny 대신 Queue에 들어올 때
+#[derive(Debug, Clone)]
+pub struct FloorQueueEntry {
+    pub user_id:   String,
+    pub priority:  u8,
+    pub indicator: FloorIndicator,
+    pub queued_at: u64,
+}
+
+/// 채널별 Floor Control 상태 (Mutex<FloorControl>로 보호)
+pub struct FloorControl {
+    /// 현재 서버 상태 (G: Floor Idle / G: Floor Taken)
+    pub state:           FloorControlState,
+    /// 현재 발언 중인 user_id (MBCP: Granted Party's Identity)
+    pub floor_taken_by:  Option<String>,
+    /// 발언권 획득 시각 — FLOOR_MAX_TAKEN_MS 초과 시 Revoke
+    pub floor_taken_at:  Option<u64>,
+    /// 현재 holder의 우선순위 — Preemption 판단 기준
+    pub floor_priority:  u8,
+    /// 현재 발언의 성격 (Emergency 여부 등)
+    pub floor_indicator: FloorIndicator,
+    /// 발언 대기열 — priority 내림차순, 동일 priority는 FIFO
+    pub queue:           VecDeque<FloorQueueEntry>,
+    /// Floor Ping 시퀀스 번호 — Pong 매칭용
+    pub ping_seq:        u32,
+    /// 마지막 Pong 수신 시각 — 타임아웃 감지용
+    pub last_pong_at:    u64,
+}
+
+impl FloorControl {
+    pub fn new() -> Self {
+        Self {
+            state:           FloorControlState::Idle,
+            floor_taken_by:  None,
+            floor_taken_at:  None,
+            floor_priority:  0,
+            floor_indicator: FloorIndicator::Normal,
+            queue:           VecDeque::new(),
+            ping_seq:        0,
+            last_pong_at:    0,
+        }
+    }
+
+    /// 발언권 상태 초기화 (Release/Revoke 후 공통 처리)
+    pub fn clear_taken(&mut self) {
+        self.state           = FloorControlState::Idle;
+        self.floor_taken_by  = None;
+        self.floor_taken_at  = None;
+        self.floor_priority  = 0;
+        self.floor_indicator = FloorIndicator::Normal;
+        self.ping_seq        = 0;
+        self.last_pong_at    = 0;
+    }
+
+    /// 발언권 부여 (Grant)
+    pub fn grant(&mut self, user_id: String, priority: u8, indicator: FloorIndicator) {
+        self.state           = FloorControlState::Taken;
+        self.floor_taken_by  = Some(user_id);
+        self.floor_taken_at  = Some(current_timestamp());
+        self.floor_priority  = priority;
+        self.floor_indicator = indicator;
+        self.ping_seq        = 0;
+        self.last_pong_at    = current_timestamp();
+    }
+
+    /// 대기열에 요청 추가 — priority 내림차순 삽입 (높은 priority가 앞)
+    /// 같은 user_id가 이미 있으면 갱신
+    pub fn enqueue(&mut self, user_id: String, priority: u8, indicator: FloorIndicator) {
+        self.queue.retain(|e| e.user_id != user_id);
+        let entry = FloorQueueEntry { user_id, priority, indicator, queued_at: current_timestamp() };
+        let pos = self.queue.iter().position(|e| e.priority < entry.priority)
+            .unwrap_or(self.queue.len());
+        self.queue.insert(pos, entry);
+    }
+
+    /// 대기열에서 다음 후보 꺼내기
+    pub fn dequeue_next(&mut self) -> Option<FloorQueueEntry> {
+        self.queue.pop_front()
+    }
+
+    /// 대기열에서 특정 user_id 제거 (CHANNEL_LEAVE 등)
+    pub fn remove_from_queue(&mut self, user_id: &str) {
+        self.queue.retain(|e| e.user_id != user_id);
+    }
+
+    /// 대기열 내 user_id의 순서 반환 (1-based, 없으면 None)
+    pub fn queue_position(&self, user_id: &str) -> Option<usize> {
+        self.queue.iter().position(|e| e.user_id == user_id).map(|i| i + 1)
+    }
+
+    /// Preemption 가능 여부 판단
+    /// Emergency는 priority 무관 항상 true
+    /// 그 외는 요청자 priority > 현재 holder priority 일 때만 true
+    pub fn can_preempt(&self, req_priority: u8, req_indicator: &FloorIndicator) -> bool {
+        if self.state != FloorControlState::Taken { return false; }
+        match req_indicator {
+            FloorIndicator::Emergency => true,
+            _ => req_priority > self.floor_priority,
+        }
+    }
+
+    /// Floor Ping 발송 전 seq 증가 후 반환
+    pub fn next_ping_seq(&mut self) -> u32 {
+        self.ping_seq = self.ping_seq.wrapping_add(1);
+        self.ping_seq
+    }
+
+    /// Floor Pong 수신 처리 — seq 일치 여부 확인 후 last_pong_at 갱신
+    pub fn on_pong(&mut self, seq: u32) -> bool {
+        if seq == self.ping_seq {
+            self.last_pong_at = current_timestamp();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Pong 타임아웃 여부 (last_pong_at 기준)
+    pub fn is_pong_timeout(&self) -> bool {
+        if self.state != FloorControlState::Taken { return false; }
+        current_timestamp().saturating_sub(self.last_pong_at) >= config::FLOOR_PONG_TIMEOUT_MS
+    }
+
+    /// 최대 발언 시간 초과 여부
+    pub fn is_max_taken_exceeded(&self) -> bool {
+        if let Some(taken_at) = self.floor_taken_at {
+            current_timestamp().saturating_sub(taken_at) >= config::FLOOR_MAX_TAKEN_MS
+        } else {
+            false
+        }
     }
 }
 
@@ -200,16 +359,15 @@ pub struct Endpoint {
     pub ice_pwd:    String,             // ICE pwd — STUN MESSAGE-INTEGRITY 검증용
     pub user_id:    String,
     pub channel_id: String,
-    pub last_seen:  AtomicU64,          // 좌비 피어 감지용
+    pub last_seen:  AtomicU64,          // 좀비 피어 감지용
 
-    // 핵패스 캐시: NAT 리바인딩 시 STUN에서 갱신
+    // 핫패스 캐시: NAT 리바인딩 시 STUN에서 갱신
     pub address: Mutex<Option<SocketAddr>>,
 
     // BUNDLE 트랙 목록 (ssrc 기준, 피어당 복수)
     pub tracks: RwLock<Vec<Track>>,
 
     // DTLS/SRTP 컨텍스트 (피어당 1개, 모든 트랙 공유)
-    // Phase 2에서 SrtpContext로 교체 예정
     pub inbound_srtp:  Mutex<SrtpContext>,
     pub outbound_srtp: Mutex<SrtpContext>,
 }
@@ -255,9 +413,7 @@ impl Endpoint {
 }
 
 pub struct MediaPeerHub {
-    // 핵패스 전용: UDP 패킷 수신 시 O(1) 엔드포인트 조회
     by_addr:  RwLock<HashMap<SocketAddr, Arc<Endpoint>>>,
-    // 콜드패스: STUN USERNAME에서 ufrag 파싱 후 엔드포인트 확정
     by_ufrag: RwLock<HashMap<String, Arc<Endpoint>>>,
 }
 
@@ -283,7 +439,7 @@ impl MediaPeerHub {
         ep
     }
 
-    /// STUN 콜드패스: ufrag으로 엔드포인트 확정 + by_addr 콜드패스 갱신
+    /// STUN 콜드패스: ufrag으로 엔드포인트 확정 + by_addr 캐시 갱신
     pub fn latch(&self, ufrag: &str, addr: SocketAddr) -> Option<Arc<Endpoint>> {
         let ep = self.by_ufrag.read().unwrap().get(ufrag).cloned()?;
         ep.latch_address(addr);
@@ -292,7 +448,7 @@ impl MediaPeerHub {
         Some(ep)
     }
 
-    /// 핵패스: SocketAddr로 O(1) 엔드포인트 조회
+    /// 핫패스: SocketAddr로 O(1) 엔드포인트 조회
     pub fn get_by_addr(&self, addr: &SocketAddr) -> Option<Arc<Endpoint>> {
         self.by_addr.read().unwrap().get(addr).cloned()
     }
@@ -308,7 +464,7 @@ impl MediaPeerHub {
         }
     }
 
-    /// 체널 내 모든 엔드포인트 반환 (릴레이 대상 목록)
+    /// 채널 내 모든 엔드포인트 반환 (릴레이 대상 목록)
     pub fn get_channel_endpoints(&self, channel_id: &str) -> Vec<Arc<Endpoint>> {
         self.by_ufrag.read().unwrap()
             .values()
@@ -317,7 +473,7 @@ impl MediaPeerHub {
             .collect()
     }
 
-    /// 좌비 피어 목록 반환 (last_seen 기준)
+    /// 좀비 피어 목록 반환 (last_seen 기준)
     pub fn find_zombies(&self, timeout_ms: u64) -> Vec<String> {
         let now = current_timestamp();
         self.by_ufrag.read().unwrap()
