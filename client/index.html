@@ -1,954 +1,1229 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ko">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>mini-livechat — E2E Test Client</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700&display=swap" rel="stylesheet">
-<style>
-  :root {
-    --bg:        #0a0c0f;
-    --surface:   #111418;
-    --border:    #1e2530;
-    --accent:    #00e5a0;
-    --accent2:   #ff6b35;
-    --warn:      #ffcc00;
-    --muted:     #3a4455;
-    --text:      #c8d4e0;
-    --text-dim:  #5a6a7a;
-    --mono:      'Share Tech Mono', monospace;
-    --sans:      'Barlow Condensed', sans-serif;
-  }
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>mini-livechat — E2E Test Client</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #0a0c0f;
+        --surface: #111418;
+        --border: #1e2530;
+        --accent: #00e5a0;
+        --accent2: #ff6b35;
+        --warn: #ffcc00;
+        --muted: #3a4455;
+        --text: #c8d4e0;
+        --text-dim: #5a6a7a;
+        --mono: 'Share Tech Mono', monospace;
+        --sans: 'Barlow Condensed', sans-serif;
+      }
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
 
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--sans);
-    font-size: 14px;
-    min-height: 100vh;
-    display: grid;
-    grid-template-rows: 48px 1fr;
-    overflow: hidden;
-  }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 14px;
+        height: 100vh;
+        display: grid;
+        grid-template-rows: 48px 1fr;
+        overflow: hidden;
+      }
 
-  /* ── 헤더 ── */
-  header {
-    display: flex;
-    align-items: center;
-    padding: 0 20px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    gap: 16px;
-  }
-  .logo {
-    font-family: var(--mono);
-    font-size: 13px;
-    color: var(--accent);
-    letter-spacing: 2px;
-    text-transform: uppercase;
-  }
-  .logo span { color: var(--text-dim); }
-  .status-dot {
-    width: 7px; height: 7px;
-    border-radius: 50%;
-    background: var(--muted);
-    transition: background 0.3s;
-    flex-shrink: 0;
-  }
-  .status-dot.on  { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
-  .status-dot.err { background: var(--accent2); box-shadow: 0 0 8px var(--accent2); }
-  #ws-status {
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--text-dim);
-    letter-spacing: 1px;
-  }
-  .header-right {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .badge {
-    font-family: var(--mono);
-    font-size: 10px;
-    padding: 2px 8px;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    letter-spacing: 1px;
-  }
+      /* ── 헤더 ── */
+      header {
+        display: flex;
+        align-items: center;
+        padding: 0 20px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+        gap: 16px;
+      }
+      .logo {
+        font-family: var(--mono);
+        font-size: 13px;
+        color: var(--accent);
+        letter-spacing: 2px;
+        text-transform: uppercase;
+      }
+      .logo span {
+        color: var(--text-dim);
+      }
+      .status-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--muted);
+        transition: background 0.3s;
+        flex-shrink: 0;
+      }
+      .status-dot.on {
+        background: var(--accent);
+        box-shadow: 0 0 8px var(--accent);
+      }
+      .status-dot.err {
+        background: var(--accent2);
+        box-shadow: 0 0 8px var(--accent2);
+      }
+      #ws-status {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--text-dim);
+        letter-spacing: 1px;
+      }
+      .header-right {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .badge {
+        font-family: var(--mono);
+        font-size: 10px;
+        padding: 2px 8px;
+        border: 1px solid var(--border);
+        color: var(--text-dim);
+        letter-spacing: 1px;
+      }
 
-  /* ── 메인 레이아웃 ── */
-  main {
-    display: grid;
-    grid-template-columns: 260px 1fr 300px;
-    overflow: hidden;
-  }
+      /* ── 메인 레이아웃 ── */
+      main {
+        display: grid;
+        grid-template-columns: 260px 1fr 300px;
+        overflow: hidden;
+      }
 
-  /* ── 공통 패널 ── */
-  .panel {
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .panel:last-child { border-right: none; }
-  .panel-title {
-    font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: 2px;
-    color: var(--text-dim);
-    padding: 10px 16px;
-    border-bottom: 1px solid var(--border);
-    text-transform: uppercase;
-  }
+      /* ── 공통 패널 ── */
+      .panel {
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .panel:last-child {
+        border-right: none;
+      }
+      .panel-title {
+        font-family: var(--mono);
+        font-size: 10px;
+        letter-spacing: 2px;
+        color: var(--text-dim);
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--border);
+        text-transform: uppercase;
+      }
 
-  /* ── 좌측: 설정 패널 ── */
-  .config-panel { background: var(--surface); }
+      /* ── 좌측: 설정 패널 ── */
+      .config-panel {
+        background: var(--surface);
+      }
 
-  .section {
-    padding: 14px 16px;
-    border-bottom: 1px solid var(--border);
-  }
-  .section-label {
-    font-family: var(--mono);
-    font-size: 9px;
-    color: var(--text-dim);
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    margin-bottom: 8px;
-  }
+      .section {
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .section-label {
+        font-family: var(--mono);
+        font-size: 9px;
+        color: var(--text-dim);
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        margin-bottom: 8px;
+      }
 
-  input[type="text"] {
-    width: 100%;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    font-family: var(--mono);
-    font-size: 12px;
-    padding: 7px 10px;
-    outline: none;
-    transition: border-color 0.2s;
-  }
-  input[type="text"]:focus { border-color: var(--accent); }
-  input[type="text"]::placeholder { color: var(--muted); }
+      input[type='text'] {
+        width: 100%;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text);
+        font-family: var(--mono);
+        font-size: 12px;
+        padding: 7px 10px;
+        outline: none;
+        transition: border-color 0.2s;
+      }
+      input[type='text']:focus {
+        border-color: var(--accent);
+      }
+      input[type='text']::placeholder {
+        color: var(--muted);
+      }
 
-  .btn {
-    font-family: var(--sans);
-    font-weight: 600;
-    font-size: 12px;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    padding: 8px 16px;
-    border: 1px solid;
-    cursor: pointer;
-    transition: all 0.15s;
-    width: 100%;
-    background: transparent;
-  }
-  .btn-primary {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .btn-primary:hover:not(:disabled) {
-    background: var(--accent);
-    color: var(--bg);
-  }
-  .btn-danger {
-    border-color: var(--accent2);
-    color: var(--accent2);
-  }
-  .btn-danger:hover:not(:disabled) {
-    background: var(--accent2);
-    color: var(--bg);
-  }
-  .btn-warn {
-    border-color: var(--warn);
-    color: var(--warn);
-  }
-  .btn-warn:hover:not(:disabled) {
-    background: var(--warn);
-    color: var(--bg);
-  }
-  .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+      .btn {
+        font-family: var(--sans);
+        font-weight: 600;
+        font-size: 12px;
+        letter-spacing: 1.5px;
+        text-transform: uppercase;
+        padding: 8px 16px;
+        border: 1px solid;
+        cursor: pointer;
+        transition: all 0.15s;
+        width: 100%;
+        background: transparent;
+      }
+      .btn-primary {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .btn-primary:hover:not(:disabled) {
+        background: var(--accent);
+        color: var(--bg);
+      }
+      .btn-danger {
+        border-color: var(--accent2);
+        color: var(--accent2);
+      }
+      .btn-danger:hover:not(:disabled) {
+        background: var(--accent2);
+        color: var(--bg);
+      }
+      .btn-warn {
+        border-color: var(--warn);
+        color: var(--warn);
+      }
+      .btn-warn:hover:not(:disabled) {
+        background: var(--warn);
+        color: var(--bg);
+      }
+      .btn:disabled {
+        opacity: 0.3;
+        cursor: not-allowed;
+      }
 
-  /* ── PTT 버튼 ── */
-  .ptt-section {
-    padding: 20px 16px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 12px;
-  }
-  #ptt-btn {
-    width: 100%;
-    height: 72px;
-    font-size: 18px;
-    font-weight: 700;
-    letter-spacing: 3px;
-    border-radius: 2px;
-    transition: all 0.1s;
-    position: relative;
-    overflow: hidden;
-  }
-  #ptt-btn.active {
-    background: var(--accent2) !important;
-    color: #fff !important;
-    border-color: var(--accent2) !important;
-    box-shadow: 0 0 20px rgba(255,107,53,0.4);
-  }
-  #ptt-btn.active::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: rgba(255,255,255,0.08);
-    animation: pulse 0.8s ease-in-out infinite;
-  }
-  @keyframes pulse {
-    0%, 100% { opacity: 0; }
-    50% { opacity: 1; }
-  }
+      /* ── PTT 버튼 ── */
+      .ptt-section {
+        padding: 20px 16px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+      }
+      #ptt-btn {
+        width: 100%;
+        height: 72px;
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: 3px;
+        border-radius: 2px;
+        transition: all 0.1s;
+        position: relative;
+        overflow: hidden;
+      }
+      #ptt-btn.active {
+        background: var(--accent2) !important;
+        color: #fff !important;
+        border-color: var(--accent2) !important;
+        box-shadow: 0 0 20px rgba(255, 107, 53, 0.4);
+      }
+      #ptt-btn.active::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: rgba(255, 255, 255, 0.08);
+        animation: pulse 0.8s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 0;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
 
-  .audio-meter {
-    width: 100%;
-    height: 4px;
-    background: var(--border);
-    position: relative;
-    overflow: hidden;
-  }
-  .audio-meter-fill {
-    height: 100%;
-    background: var(--accent);
-    width: 0%;
-    transition: width 0.05s;
-  }
+      .audio-meter {
+        width: 100%;
+        height: 4px;
+        background: var(--border);
+        position: relative;
+        overflow: hidden;
+      }
+      .audio-meter-fill {
+        height: 100%;
+        background: var(--accent);
+        width: 0%;
+        transition: width 0.05s;
+      }
 
-  /* ── 채널 목록 ── */
-  .channel-list { padding: 8px 0; overflow-y: auto; flex: 1; }
-  .channel-item {
-    padding: 8px 16px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    transition: background 0.15s;
-  }
-  .channel-item:hover { background: var(--border); }
-  .channel-item.active { background: rgba(0,229,160,0.08); }
-  .channel-item .ch-icon {
-    font-family: var(--mono);
-    font-size: 10px;
-    color: var(--text-dim);
-    width: 16px;
-  }
-  .channel-item .ch-name {
-    font-weight: 600;
-    font-size: 13px;
-    letter-spacing: 0.5px;
-    flex: 1;
-  }
-  .channel-item.active .ch-name { color: var(--accent); }
-  .channel-item .ch-count {
-    font-family: var(--mono);
-    font-size: 10px;
-    color: var(--text-dim);
-  }
+      /* ── 채널 목록 ── */
+      .channel-list {
+        padding: 8px 0;
+        overflow-y: auto;
+        flex: 1;
+      }
+      .channel-item {
+        padding: 8px 16px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        transition: background 0.15s;
+      }
+      .channel-item:hover {
+        background: var(--border);
+      }
+      .channel-item.active {
+        background: rgba(0, 229, 160, 0.08);
+      }
+      .channel-item .ch-icon {
+        font-family: var(--mono);
+        font-size: 10px;
+        color: var(--text-dim);
+        width: 16px;
+      }
+      .channel-item .ch-name {
+        font-weight: 600;
+        font-size: 13px;
+        letter-spacing: 0.5px;
+        flex: 1;
+      }
+      .channel-item.active .ch-name {
+        color: var(--accent);
+      }
+      .channel-item .ch-count {
+        font-family: var(--mono);
+        font-size: 10px;
+        color: var(--text-dim);
+      }
 
-  /* ── 중앙: 로그 패널 ── */
-  .log-panel { background: var(--bg); }
-  .log-area {
-    flex: 1;
-    overflow-y: scroll;
-    min-height: 0;      /* flex 자식에서 overflow 동작하려면 필수 */
-    padding: 12px;
-    font-family: var(--mono);
-    font-size: 11px;
-    line-height: 1.8;
-  }
-  .log-entry {
-    display: flex;
-    gap: 10px;
-    padding: 2px 0;
-    border-bottom: 1px solid rgba(30,37,48,0.5);
-  }
-  .log-time { color: var(--text-dim); flex-shrink: 0; width: 60px; }
-  .log-dir  { flex-shrink: 0; width: 18px; text-align: center; }
-  .log-dir.in  { color: var(--accent); }
-  .log-dir.out { color: var(--accent2); }
-  .log-dir.sys { color: var(--warn); }
-  .log-body { flex: 1; word-break: break-all; color: var(--text); }
-  .log-body.err { color: var(--accent2); }
-  .log-body.ok  { color: var(--accent); }
+      /* ── 중앙: 로그 패널 ── */
+      .log-panel {
+        background: var(--bg);
+      }
+      .log-area {
+        flex: 1;
+        overflow-y: scroll;
+        min-height: 0; /* flex 자식에서 overflow 동작하려면 필수 */
+        padding: 12px;
+        font-family: var(--mono);
+        font-size: 11px;
+        line-height: 1.8;
+      }
+      .log-entry {
+        display: flex;
+        gap: 10px;
+        padding: 2px 0;
+        border-bottom: 1px solid rgba(30, 37, 48, 0.5);
+      }
+      .log-time {
+        color: var(--text-dim);
+        flex-shrink: 0;
+        width: 60px;
+      }
+      .log-dir {
+        flex-shrink: 0;
+        width: 18px;
+        text-align: center;
+      }
+      .log-dir.in {
+        color: var(--accent);
+      }
+      .log-dir.out {
+        color: var(--accent2);
+      }
+      .log-dir.sys {
+        color: var(--warn);
+      }
+      .log-body {
+        flex: 1;
+        word-break: break-all;
+        color: var(--text);
+      }
+      .log-body.err {
+        color: var(--accent2);
+      }
+      .log-body.ok {
+        color: var(--accent);
+      }
 
-  /* 채팅 입력 */
-  .chat-input-area {
-    padding: 12px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    gap: 8px;
-  }
-  .chat-input-area input { flex: 1; }
-  .chat-input-area .btn { width: auto; padding: 8px 14px; }
+      /* 채팅 입력 */
+      .chat-input-area {
+        padding: 12px;
+        border-top: 1px solid var(--border);
+        display: flex;
+        gap: 8px;
+      }
+      .chat-input-area input {
+        flex: 1;
+      }
+      .chat-input-area .btn {
+        width: auto;
+        padding: 8px 14px;
+      }
 
-  /* ── 우측: 상태 패널 ── */
-  .state-panel { background: var(--surface); }
-  .state-section { padding: 12px 16px; border-bottom: 1px solid var(--border); }
-  .state-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 4px 0;
-    font-size: 12px;
-  }
-  .state-key {
-    font-family: var(--mono);
-    font-size: 10px;
-    color: var(--text-dim);
-    letter-spacing: 1px;
-  }
-  .state-val {
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--text);
-    text-align: right;
-    max-width: 160px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .state-val.ok   { color: var(--accent); }
-  .state-val.err  { color: var(--accent2); }
-  .state-val.warn { color: var(--warn); }
+      /* ── 우측: 상태 패널 ── */
+      .state-panel {
+        background: var(--surface);
+      }
+      .state-section {
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .state-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 4px 0;
+        font-size: 12px;
+      }
+      .state-key {
+        font-family: var(--mono);
+        font-size: 10px;
+        color: var(--text-dim);
+        letter-spacing: 1px;
+      }
+      .state-val {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--text);
+        text-align: right;
+        max-width: 160px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .state-val.ok {
+        color: var(--accent);
+      }
+      .state-val.err {
+        color: var(--accent2);
+      }
+      .state-val.warn {
+        color: var(--warn);
+      }
 
-  /* 멤버 목록 */
-  .member-list { overflow-y: auto; flex: 1; padding: 8px 0; }
-  .member-item {
-    padding: 8px 16px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    border-bottom: 1px solid rgba(30,37,48,0.5);
-  }
-  .member-avatar {
-    width: 28px; height: 28px;
-    background: var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: var(--mono);
-    font-size: 10px;
-    color: var(--accent);
-    flex-shrink: 0;
-  }
-  .member-info { flex: 1; }
-  .member-name { font-weight: 600; font-size: 13px; }
-  .member-ssrc { font-family: var(--mono); font-size: 9px; color: var(--text-dim); }
-  .member-speaking {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--muted);
-  }
-  .member-speaking.on { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+      /* 멤버 목록 */
+      .member-list {
+        overflow-y: auto;
+        flex: 1;
+        padding: 8px 0;
+      }
+      .member-item {
+        padding: 8px 16px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        border-bottom: 1px solid rgba(30, 37, 48, 0.5);
+      }
+      .member-avatar {
+        width: 28px;
+        height: 28px;
+        background: var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: var(--mono);
+        font-size: 10px;
+        color: var(--accent);
+        flex-shrink: 0;
+      }
+      .member-info {
+        flex: 1;
+      }
+      .member-name {
+        font-weight: 600;
+        font-size: 13px;
+      }
+      .member-ssrc {
+        font-family: var(--mono);
+        font-size: 9px;
+        color: var(--text-dim);
+      }
+      .member-speaking {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--muted);
+      }
+      .member-speaking.on {
+        background: var(--accent2);
+        box-shadow: 0 0 6px var(--accent2);
+      }
 
-  /* SDP 뷰어 */
-  .sdp-viewer {
-    padding: 10px 12px;
-    font-family: var(--mono);
-    font-size: 9px;
-    color: var(--text-dim);
-    background: var(--bg);
-    overflow-y: auto;
-    max-height: 140px;
-    line-height: 1.6;
-    white-space: pre-wrap;
-    word-break: break-all;
-    border-top: 1px solid var(--border);
-  }
+      /* SDP 뷰어 */
+      .sdp-viewer {
+        padding: 10px 12px;
+        font-family: var(--mono);
+        font-size: 9px;
+        color: var(--text-dim);
+        background: var(--bg);
+        overflow-y: auto;
+        max-height: 140px;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        word-break: break-all;
+        border-top: 1px solid var(--border);
+      }
 
-  /* 스크롤바 */
-  ::-webkit-scrollbar { width: 4px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--border); }
-  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+      /* 스크롤바 */
+      ::-webkit-scrollbar {
+        width: 4px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: var(--border);
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: var(--muted);
+      }
 
-  /* 애니메이션 */
-  @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(-4px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-  .log-entry { animation: fadeIn 0.15s ease-out; }
+      /* 애니메이션 */
+      @keyframes fadeIn {
+        from {
+          opacity: 0;
+          transform: translateY(-4px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      .log-entry {
+        animation: fadeIn 0.15s ease-out;
+      }
 
-  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .mt4 { margin-top: 4px; }
-  .mt8 { margin-top: 8px; }
-</style>
-</head>
-<body>
-
-<header>
-  <div class="logo">mini<span>-</span>livechat <span>// E2E</span></div>
-  <div class="status-dot" id="dot"></div>
-  <div id="ws-status">DISCONNECTED</div>
-  <div class="header-right">
-    <div class="badge" id="hb-badge">HB: —</div>
-    <div class="badge" id="ice-badge">ICE: —</div>
-    <div class="badge" id="dtls-badge">DTLS: —</div>
-  </div>
-</header>
-
-<main>
-  <!-- ── 좌측: 설정 + 컨트롤 ── -->
-  <div class="panel config-panel">
-    <div class="panel-title">// config</div>
-
-    <div class="section">
-      <div class="section-label">서버</div>
-      <input type="text" id="srv-url" value="ws://localhost:8080/ws" placeholder="ws://...">
-    </div>
-
-    <div class="section">
-      <div class="section-label">인증</div>
-      <input type="text" id="user-id" value="user_alice" placeholder="user_id" style="margin-bottom:6px">
-      <input type="text" id="token"   value="changeme-secret" placeholder="token">
-    </div>
-
-    <div class="section">
-      <div class="grid-2">
-        <button class="btn btn-primary" id="btn-connect">CONNECT</button>
-        <button class="btn btn-danger"  id="btn-disconnect" disabled>DISC</button>
+      .grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
+      .mt4 {
+        margin-top: 4px;
+      }
+      .mt8 {
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="logo">mini<span>-</span>livechat <span>// E2E</span></div>
+      <div class="status-dot" id="dot"></div>
+      <div id="ws-status">DISCONNECTED</div>
+      <div class="header-right">
+        <div class="badge" id="hb-badge">HB: —</div>
+        <div class="badge" id="ice-badge">ICE: —</div>
+        <div class="badge" id="dtls-badge">DTLS: —</div>
       </div>
-      <div class="mt4">
-        <button class="btn btn-primary" id="btn-identify" disabled>IDENTIFY</button>
+    </header>
+
+    <main>
+      <!-- ── 좌측: 설정 + 컨트롤 ── -->
+      <div class="panel config-panel">
+        <div class="panel-title">// config</div>
+
+        <div class="section">
+          <div class="section-label">서버</div>
+          <input
+            type="text"
+            id="srv-url"
+            value="ws://localhost:8080/ws"
+            placeholder="ws://..."
+          />
+        </div>
+
+        <div class="section">
+          <div class="section-label">인증</div>
+          <input
+            type="text"
+            id="user-id"
+            value="user_alice"
+            placeholder="user_id"
+            style="margin-bottom: 6px"
+          />
+          <input
+            type="text"
+            id="token"
+            value="changeme-secret"
+            placeholder="token"
+          />
+        </div>
+
+        <div class="section">
+          <div class="grid-2">
+            <button class="btn btn-primary" id="btn-connect">CONNECT</button>
+            <button class="btn btn-danger" id="btn-disconnect" disabled>
+              DISC
+            </button>
+          </div>
+          <div class="mt4">
+            <button class="btn btn-primary" id="btn-identify" disabled>
+              IDENTIFY
+            </button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-label">채널</div>
+          <input
+            type="text"
+            id="channel-id"
+            value="CH_001"
+            placeholder="channel_id"
+            style="margin-bottom: 6px"
+          />
+          <div class="grid-2">
+            <button class="btn btn-primary" id="btn-create" disabled>
+              CREATE
+            </button>
+            <button class="btn btn-primary" id="btn-join" disabled>JOIN</button>
+          </div>
+          <div class="mt4">
+            <button class="btn btn-danger" id="btn-leave" disabled>
+              LEAVE
+            </button>
+          </div>
+        </div>
+
+        <div class="ptt-section">
+          <div class="section-label">PTT (Push-To-Talk)</div>
+          <button class="btn btn-warn" id="ptt-btn" disabled>
+            ● PUSH TO TALK
+          </button>
+          <div class="audio-meter">
+            <div class="audio-meter-fill" id="meter-fill"></div>
+          </div>
+          <div
+            style="
+              font-family: var(--mono);
+              font-size: 9px;
+              color: var(--text-dim);
+              text-align: center;
+            "
+            id="media-state"
+          >
+            미디어 비활성
+          </div>
+        </div>
+
+        <div style="flex: 1"></div>
+        <div class="section">
+          <button
+            class="btn btn-primary"
+            id="btn-clear"
+            style="font-size: 10px"
+          >
+            CLEAR LOG
+          </button>
+        </div>
       </div>
-    </div>
 
-    <div class="section">
-      <div class="section-label">채널</div>
-      <input type="text" id="channel-id" value="CH_001" placeholder="channel_id" style="margin-bottom:6px">
-      <div class="grid-2">
-        <button class="btn btn-primary" id="btn-create" disabled>CREATE</button>
-        <button class="btn btn-primary" id="btn-join"   disabled>JOIN</button>
+      <!-- ── 중앙: 로그 ── -->
+      <div class="panel log-panel">
+        <div class="panel-title">// protocol log</div>
+        <div class="log-area" id="log-area"></div>
+        <div class="chat-input-area">
+          <input
+            type="text"
+            id="chat-input"
+            placeholder="채팅 메시지 입력..."
+            disabled
+          />
+          <button class="btn btn-primary" id="btn-send" disabled>SEND</button>
+        </div>
       </div>
-      <div class="mt4">
-        <button class="btn btn-danger"  id="btn-leave"  disabled>LEAVE</button>
+
+      <!-- ── 우측: 상태 + 멤버 ── -->
+      <div class="panel state-panel">
+        <div class="panel-title">// state</div>
+
+        <div class="state-section">
+          <div class="state-row">
+            <span class="state-key">WS</span>
+            <span class="state-val" id="s-ws">—</span>
+          </div>
+          <div class="state-row">
+            <span class="state-key">USER</span>
+            <span class="state-val" id="s-user">—</span>
+          </div>
+          <div class="state-row">
+            <span class="state-key">CHANNEL</span>
+            <span class="state-val" id="s-channel">—</span>
+          </div>
+          <div class="state-row">
+            <span class="state-key">SSRC</span>
+            <span class="state-val" id="s-ssrc">—</span>
+          </div>
+          <div class="state-row">
+            <span class="state-key">ICE</span>
+            <span class="state-val" id="s-ice">—</span>
+          </div>
+          <div class="state-row">
+            <span class="state-key">DTLS</span>
+            <span class="state-val" id="s-dtls">—</span>
+          </div>
+          <div class="state-row">
+            <span class="state-key">SRTP</span>
+            <span class="state-val" id="s-srtp">—</span>
+          </div>
+        </div>
+
+        <div class="panel-title" style="border-top: none">// members</div>
+        <div class="member-list" id="member-list"></div>
+
+        <div class="panel-title" style="margin-top: auto">// sdp answer</div>
+        <div class="sdp-viewer" id="sdp-viewer">—</div>
       </div>
-    </div>
+    </main>
 
-    <div class="ptt-section">
-      <div class="section-label">PTT (Push-To-Talk)</div>
-      <button class="btn btn-warn" id="ptt-btn" disabled>● PUSH TO TALK</button>
-      <div class="audio-meter">
-        <div class="audio-meter-fill" id="meter-fill"></div>
-      </div>
-      <div style="font-family:var(--mono);font-size:9px;color:var(--text-dim);text-align:center" id="media-state">
-        미디어 비활성
-      </div>
-    </div>
+    <script>
+      // ============================================================
+      // 상태
+      // ============================================================
+      const state = {
+        ws: null,
+        pc: null,
+        stream: null,
+        analyser: null,
+        meterTimer: null,
+        hbTimer: null,
+        ssrc: null,
+        ufrag: null,
+        channel: null,
+        ready: false,
+        pttActive: false,
+      };
 
-    <div style="flex:1"></div>
-    <div class="section">
-      <button class="btn btn-primary" id="btn-clear" style="font-size:10px">CLEAR LOG</button>
-    </div>
-  </div>
+      const $ = (id) => document.getElementById(id);
 
-  <!-- ── 중앙: 로그 ── -->
-  <div class="panel log-panel">
-    <div class="panel-title">// protocol log</div>
-    <div class="log-area" id="log-area"></div>
-    <div class="chat-input-area">
-      <input type="text" id="chat-input" placeholder="채팅 메시지 입력..." disabled>
-      <button class="btn btn-primary" id="btn-send" disabled>SEND</button>
-    </div>
-  </div>
+      // ============================================================
+      // 로그
+      // ============================================================
+      function log(dir, msg, cls = '') {
+        const now = new Date();
+        const t = `${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}.${String(now.getMilliseconds()).padStart(3, '0')}`;
+        const el = document.createElement('div');
+        el.className = 'log-entry';
+        el.innerHTML = `<span class="log-time">${t}</span><span class="log-dir ${dir}">${dir === 'in' ? '↓' : dir === 'out' ? '↑' : '·'}</span><span class="log-body ${cls}">${escHtml(msg)}</span>`;
+        const area = $('log-area');
+        area.appendChild(el);
+        area.scrollTop = area.scrollHeight;
+      }
+      function escHtml(s) {
+        return String(s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+      }
 
-  <!-- ── 우측: 상태 + 멤버 ── -->
-  <div class="panel state-panel">
-    <div class="panel-title">// state</div>
+      // ============================================================
+      // 상태 UI
+      // ============================================================
+      function setState(key, val, cls = '') {
+        const el = $(`s-${key}`);
+        if (!el) return;
+        el.textContent = val;
+        el.className = `state-val ${cls}`;
+      }
+      function setBadge(id, val, cls = '') {
+        const el = $(id);
+        if (!el) return;
+        el.textContent = val;
+        el.style.color =
+          cls === 'ok'
+            ? 'var(--accent)'
+            : cls === 'err'
+              ? 'var(--accent2)'
+              : cls === 'warn'
+                ? 'var(--warn)'
+                : 'var(--text-dim)';
+      }
 
-    <div class="state-section">
-      <div class="state-row">
-        <span class="state-key">WS</span>
-        <span class="state-val" id="s-ws">—</span>
-      </div>
-      <div class="state-row">
-        <span class="state-key">USER</span>
-        <span class="state-val" id="s-user">—</span>
-      </div>
-      <div class="state-row">
-        <span class="state-key">CHANNEL</span>
-        <span class="state-val" id="s-channel">—</span>
-      </div>
-      <div class="state-row">
-        <span class="state-key">SSRC</span>
-        <span class="state-val" id="s-ssrc">—</span>
-      </div>
-      <div class="state-row">
-        <span class="state-key">ICE</span>
-        <span class="state-val" id="s-ice">—</span>
-      </div>
-      <div class="state-row">
-        <span class="state-key">DTLS</span>
-        <span class="state-val" id="s-dtls">—</span>
-      </div>
-      <div class="state-row">
-        <span class="state-key">SRTP</span>
-        <span class="state-val" id="s-srtp">—</span>
-      </div>
-    </div>
+      function randomSSRC() {
+        return Math.floor(Math.random() * 0xffffffff) + 1;
+      }
 
-    <div class="panel-title" style="border-top:none">// members</div>
-    <div class="member-list" id="member-list"></div>
+      // ============================================================
+      // WebSocket
+      // ============================================================
+      function wsConnect() {
+        const url = $('srv-url').value.trim();
+        log('sys', `connecting → ${url}`);
+        state.ws = new WebSocket(url);
 
-    <div class="panel-title" style="margin-top:auto">// sdp answer</div>
-    <div class="sdp-viewer" id="sdp-viewer">—</div>
-  </div>
-</main>
+        state.ws.onopen = () => {
+          $('dot').className = 'status-dot on';
+          $('ws-status').textContent = 'CONNECTED';
+          setState('ws', 'OPEN', 'ok');
+          log('sys', 'WS connected', 'ok');
+          setButtons('connected');
+        };
 
-<script>
-// ============================================================
-// 상태
-// ============================================================
-const state = {
-  ws:          null,
-  pc:          null,
-  stream:      null,
-  analyser:    null,
-  meterTimer:  null,
-  hbTimer:     null,
-  ssrc:        null,
-  ufrag:       null,
-  channel:     null,
-  ready:       false,
-  pttActive:   false,
-};
+        state.ws.onmessage = (e) => {
+          let pkt;
+          try {
+            pkt = JSON.parse(e.data);
+          } catch {
+            log('in', e.data);
+            return;
+          }
+          log('in', JSON.stringify(pkt));
+          handlePacket(pkt);
+        };
 
-const $ = id => document.getElementById(id);
+        state.ws.onclose = (e) => {
+          $('dot').className = 'status-dot';
+          $('ws-status').textContent = 'DISCONNECTED';
+          setState('ws', 'CLOSED', 'err');
+          log('sys', `WS closed (${e.code})`, 'err');
+          clearInterval(state.hbTimer);
+          setButtons('disconnected');
+          state.ready = false;
+        };
 
-// ============================================================
-// 로그
-// ============================================================
-function log(dir, msg, cls = '') {
-  const now = new Date();
-  const t   = `${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}.${String(now.getMilliseconds()).padStart(3,'0')}`;
-  const el  = document.createElement('div');
-  el.className = 'log-entry';
-  el.innerHTML = `<span class="log-time">${t}</span><span class="log-dir ${dir}">${dir==='in'?'↓':dir==='out'?'↑':'·'}</span><span class="log-body ${cls}">${escHtml(msg)}</span>`;
-  const area = $('log-area');
-  area.appendChild(el);
-  area.scrollTop = area.scrollHeight;
-}
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
+        state.ws.onerror = () => {
+          $('dot').className = 'status-dot err';
+          log('sys', 'WS error', 'err');
+        };
+      }
 
-// ============================================================
-// 상태 UI
-// ============================================================
-function setState(key, val, cls = '') {
-  const el = $(`s-${key}`);
-  if (!el) return;
-  el.textContent = val;
-  el.className   = `state-val ${cls}`;
-}
-function setBadge(id, val, cls = '') {
-  const el = $(id);
-  if (!el) return;
-  el.textContent = val;
-  el.style.color = cls==='ok' ? 'var(--accent)' : cls==='err' ? 'var(--accent2)' : cls==='warn' ? 'var(--warn)' : 'var(--text-dim)';
-}
+      function wsSend(obj) {
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+          log('sys', 'WS not open', 'err');
+          return;
+        }
+        log('out', JSON.stringify(obj));
+        state.ws.send(JSON.stringify(obj));
+      }
 
-function randomSSRC() {
-  return Math.floor(Math.random() * 0xFFFFFFFF) + 1;
-}
+      // ============================================================
+      // 패킷 핸들러
+      // ============================================================
+      function handlePacket(pkt) {
+        switch (pkt.op) {
+          case 0:
+            onHello(pkt.d);
+            break;
+          case 2:
+            /* HEARTBEAT_ACK */ break;
+          case 4:
+            onReady(pkt.d);
+            break;
+          case 100:
+            onChannelEvent(pkt.d);
+            break;
+          case 101:
+            onMessageEvent(pkt.d);
+            break;
+          case 200:
+            onAck(pkt.d);
+            break;
+          case 201:
+            onError(pkt.d);
+            break;
+        }
+      }
 
-// ============================================================
-// WebSocket
-// ============================================================
-function wsConnect() {
-  const url = $('srv-url').value.trim();
-  log('sys', `connecting → ${url}`);
-  state.ws = new WebSocket(url);
+      function onHello(d) {
+        log('sys', `HELLO — heartbeat every ${d.heartbeat_interval}ms`);
+        clearInterval(state.hbTimer);
+        state.hbTimer = setInterval(() => {
+          wsSend({ op: 1, d: null });
+          const t = new Date()
+            .toLocaleTimeString('ko-KR', { hour12: false })
+            .slice(0, 5);
+          setBadge('hb-badge', `HB: ${t}`);
+        }, d.heartbeat_interval);
+      }
 
-  state.ws.onopen = () => {
-    $('dot').className = 'status-dot on';
-    $('ws-status').textContent = 'CONNECTED';
-    setState('ws', 'OPEN', 'ok');
-    log('sys', 'WS connected', 'ok');
-    setButtons('connected');
-  };
+      function onReady(d) {
+        state.ready = true;
+        setState('user', d.user_id, 'ok');
+        log('sys', `READY — session ${d.session_id}`, 'ok');
+        setButtons('ready');
+      }
 
-  state.ws.onmessage = e => {
-    let pkt;
-    try { pkt = JSON.parse(e.data); } catch { log('in', e.data); return; }
-    log('in', JSON.stringify(pkt));
-    handlePacket(pkt);
-  };
+      function onAck(d) {
+        if (d.op === 11) onChannelJoinAck(d.data);
+      }
 
-  state.ws.onclose = e => {
-    $('dot').className = 'status-dot';
-    $('ws-status').textContent = 'DISCONNECTED';
-    setState('ws', 'CLOSED', 'err');
-    log('sys', `WS closed (${e.code})`, 'err');
-    clearInterval(state.hbTimer);
-    setButtons('disconnected');
-    state.ready = false;
-  };
+      function onError(d) {
+        log('sys', `ERROR ${d.code}: ${d.reason}`, 'err');
+      }
 
-  state.ws.onerror = () => {
-    $('dot').className = 'status-dot err';
-    log('sys', 'WS error', 'err');
-  };
-}
+      function onChannelEvent(d) {
+        if (d.event === 'join') {
+          log('sys', `${d.member.user_id} joined ${d.channel_id}`);
+          addMember(d.member.user_id, d.member.ssrc);
+        }
+        if (d.event === 'leave') {
+          log('sys', `${d.member.user_id} left ${d.channel_id}`);
+          removeMember(d.member.user_id);
+        }
+      }
 
-function wsSend(obj) {
-  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
-    log('sys', 'WS not open', 'err'); return;
-  }
-  log('out', JSON.stringify(obj));
-  state.ws.send(JSON.stringify(obj));
-}
+      function onMessageEvent(d) {
+        log('in', `[${d.author_id}] ${d.content}`);
+      }
 
-// ============================================================
-// 패킷 핸들러
-// ============================================================
-function handlePacket(pkt) {
-  switch(pkt.op) {
-    case 0:   onHello(pkt.d);        break;
-    case 2:   /* HEARTBEAT_ACK */    break;
-    case 4:   onReady(pkt.d);        break;
-    case 100: onChannelEvent(pkt.d); break;
-    case 101: onMessageEvent(pkt.d); break;
-    case 200: onAck(pkt.d);          break;
-    case 201: onError(pkt.d);        break;
-  }
-}
+      async function onChannelJoinAck(data) {
+        setState('channel', data.channel_id, 'ok');
+        state.channel = data.channel_id;
+        log('sys', `joined ${data.channel_id}`, 'ok');
 
-function onHello(d) {
-  log('sys', `HELLO — heartbeat every ${d.heartbeat_interval}ms`);
-  clearInterval(state.hbTimer);
-  state.hbTimer = setInterval(() => {
-    wsSend({ op: 1, d: null });
-    const t = new Date().toLocaleTimeString('ko-KR', {hour12:false}).slice(0,5);
-    setBadge('hb-badge', `HB: ${t}`);
-  }, d.heartbeat_interval);
-}
+        $('member-list').innerHTML = '';
+        (data.active_members || []).forEach((m) =>
+          addMember(m.user_id, m.ssrc),
+        );
 
-function onReady(d) {
-  state.ready = true;
-  setState('user', d.user_id, 'ok');
-  log('sys', `READY — session ${d.session_id}`, 'ok');
-  setButtons('ready');
-}
+        if (data.sdp_answer && state.pc) {
+          $('sdp-viewer').textContent = data.sdp_answer;
+          log('sys', 'SDP answer received — setting remote description...');
+          try {
+            await state.pc.setRemoteDescription({
+              type: 'answer',
+              sdp: data.sdp_answer,
+            });
+            log('sys', 'remote description set OK', 'ok');
+            setState('dtls', 'NEGOTIATING', 'warn');
+            setBadge('dtls-badge', 'DTLS: NEG', 'warn');
+          } catch (e) {
+            log('sys', `setRemoteDescription failed: ${e.message}`, 'err');
+            setState('dtls', 'FAILED', 'err');
+          }
+        }
 
-function onAck(d) {
-  if (d.op === 11) onChannelJoinAck(d.data);
-}
+        setButtons('joined');
+      }
 
-function onError(d) {
-  log('sys', `ERROR ${d.code}: ${d.reason}`, 'err');
-}
+      // ============================================================
+      // WebRTC
+      // ============================================================
+      async function setupWebRTC() {
+        try {
+          state.stream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: false,
+          });
+          $('media-state').textContent = '마이크 획득';
+          log('sys', 'microphone acquired', 'ok');
+        } catch (e) {
+          log('sys', `mic error: ${e.message}`, 'err');
+          $('media-state').textContent = '마이크 실패 — SDP 없이 진행';
+          return null;
+        }
 
-function onChannelEvent(d) {
-  if (d.event === 'join') {
-    log('sys', `${d.member.user_id} joined ${d.channel_id}`);
-    addMember(d.member.user_id, d.member.ssrc);
-  }
-  if (d.event === 'leave') {
-    log('sys', `${d.member.user_id} left ${d.channel_id}`);
-    removeMember(d.member.user_id);
-  }
-}
+        state.pc = new RTCPeerConnection({
+          iceServers: [],
+          iceTransportPolicy: 'all',
+        });
 
-function onMessageEvent(d) {
-  log('in', `[${d.author_id}] ${d.content}`);
-}
+        const track = state.stream.getAudioTracks()[0];
+        track.enabled = false; // PTT 누를 때만 활성화
+        state.pc.addTrack(track, state.stream);
 
-async function onChannelJoinAck(data) {
-  setState('channel', data.channel_id, 'ok');
-  state.channel = data.channel_id;
-  log('sys', `joined ${data.channel_id}`, 'ok');
+        state.pc.onicecandidate = (e) => {
+          if (e.candidate)
+            log(
+              'sys',
+              `ICE cand: ${e.candidate.candidate.substring(0, 70)}...`,
+            );
+        };
 
-  $('member-list').innerHTML = '';
-  (data.active_members || []).forEach(m => addMember(m.user_id, m.ssrc));
+        state.pc.oniceconnectionstatechange = () => {
+          const s = state.pc.iceConnectionState;
+          const cls =
+            s === 'connected' || s === 'completed'
+              ? 'ok'
+              : s === 'failed'
+                ? 'err'
+                : 'warn';
+          setState('ice', s.toUpperCase(), cls);
+          setBadge('ice-badge', `ICE: ${s.substring(0, 4).toUpperCase()}`, cls);
+          log('sys', `ICE state: ${s}`);
 
-  if (data.sdp_answer && state.pc) {
-    $('sdp-viewer').textContent = data.sdp_answer;
-    log('sys', 'SDP answer received — setting remote description...');
-    try {
-      await state.pc.setRemoteDescription({ type: 'answer', sdp: data.sdp_answer });
-      log('sys', 'remote description set OK', 'ok');
-      setState('dtls', 'NEGOTIATING', 'warn');
-      setBadge('dtls-badge', 'DTLS: NEG', 'warn');
-    } catch(e) {
-      log('sys', `setRemoteDescription failed: ${e.message}`, 'err');
-      setState('dtls', 'FAILED', 'err');
-    }
-  }
+          if (s === 'connected' || s === 'completed') {
+            setState('srtp', 'ACTIVE', 'ok');
+            $('ptt-btn').disabled = false;
+            $('media-state').textContent = 'SRTP 활성 — PTT 준비';
+            startMeter();
+          }
+        };
 
-  setButtons('joined');
-}
+        state.pc.onconnectionstatechange = () => {
+          const s = state.pc.connectionState;
+          const cls =
+            s === 'connected' ? 'ok' : s === 'failed' ? 'err' : 'warn';
+          setState('dtls', s.toUpperCase(), cls);
+          setBadge(
+            'dtls-badge',
+            `DTLS: ${s.substring(0, 4).toUpperCase()}`,
+            cls,
+          );
+          log('sys', `Connection state: ${s}`);
+        };
 
-// ============================================================
-// WebRTC
-// ============================================================
-async function setupWebRTC() {
-  try {
-    state.stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    $('media-state').textContent = '마이크 획득';
-    log('sys', 'microphone acquired', 'ok');
-  } catch(e) {
-    log('sys', `mic error: ${e.message}`, 'err');
-    $('media-state').textContent = '마이크 실패 — SDP 없이 진행';
-    return null;
-  }
+        state.pc.ontrack = (e) => {
+          log('sys', 'remote audio track received', 'ok');
+          const audio = new Audio();
+          audio.srcObject = e.streams[0];
+          audio.play().catch(() => {});
+        };
 
-  state.pc = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: 'all' });
+        const offer = await state.pc.createOffer({ offerToReceiveAudio: true });
+        await state.pc.setLocalDescription(offer);
 
-  const track = state.stream.getAudioTracks()[0];
-  track.enabled = false; // PTT 누를 때만 활성화
-  state.pc.addTrack(track, state.stream);
+        // ICE gathering 완료 대기 (최대 3초)
+        await new Promise((resolve) => {
+          if (state.pc.iceGatheringState === 'complete') {
+            resolve();
+            return;
+          }
+          state.pc.onicegatheringstatechange = () => {
+            if (state.pc.iceGatheringState === 'complete') resolve();
+          };
+          setTimeout(resolve, 3000);
+        });
 
-  state.pc.onicecandidate = e => {
-    if (e.candidate) log('sys', `ICE cand: ${e.candidate.candidate.substring(0,70)}...`);
-  };
+        const sdpStr = state.pc.localDescription.sdp;
 
-  state.pc.oniceconnectionstatechange = () => {
-    const s = state.pc.iceConnectionState;
-    const cls = (s==='connected'||s==='completed') ? 'ok' : s==='failed' ? 'err' : 'warn';
-    setState('ice', s.toUpperCase(), cls);
-    setBadge('ice-badge', `ICE: ${s.substring(0,4).toUpperCase()}`, cls);
-    log('sys', `ICE state: ${s}`);
+        const ssrcMatch = sdpStr.match(/a=ssrc:(\d+)/);
+        state.ssrc = ssrcMatch ? parseInt(ssrcMatch[1]) : randomSSRC();
 
-    if (s === 'connected' || s === 'completed') {
-      setState('srtp', 'ACTIVE', 'ok');
-      $('ptt-btn').disabled = false;
-      $('media-state').textContent = 'SRTP 활성 — PTT 준비';
-      startMeter();
-    }
-  };
+        const ufragMatch = sdpStr.match(/a=ice-ufrag:(\S+)/);
+        state.ufrag = ufragMatch
+          ? ufragMatch[1]
+          : `uf${Math.random().toString(36).slice(2, 6)}`;
 
-  state.pc.onconnectionstatechange = () => {
-    const s = state.pc.connectionState;
-    const cls = s==='connected' ? 'ok' : s==='failed' ? 'err' : 'warn';
-    setState('dtls', s.toUpperCase(), cls);
-    setBadge('dtls-badge', `DTLS: ${s.substring(0,4).toUpperCase()}`, cls);
-    log('sys', `Connection state: ${s}`);
-  };
+        setState('ssrc', state.ssrc);
+        log('sys', `offer ready — ssrc=${state.ssrc} ufrag=${state.ufrag}`);
 
-  state.pc.ontrack = e => {
-    log('sys', 'remote audio track received', 'ok');
-    const audio = new Audio();
-    audio.srcObject = e.streams[0];
-    audio.play().catch(() => {});
-  };
+        return sdpStr;
+      }
 
-  const offer = await state.pc.createOffer({ offerToReceiveAudio: true });
-  await state.pc.setLocalDescription(offer);
+      // ============================================================
+      // 볼륨 미터
+      // ============================================================
+      function startMeter() {
+        if (!state.stream || state.analyser) return;
+        const ctx = new AudioContext();
+        const src = ctx.createMediaStreamSource(state.stream);
+        state.analyser = ctx.createAnalyser();
+        state.analyser.fftSize = 256;
+        src.connect(state.analyser);
+        const data = new Uint8Array(state.analyser.frequencyBinCount);
+        state.meterTimer = setInterval(() => {
+          state.analyser.getByteFrequencyData(data);
+          const avg = data.reduce((a, b) => a + b, 0) / data.length;
+          const pct = Math.min(100, avg * 2.5);
+          const fill = $('meter-fill');
+          fill.style.width = `${pct}%`;
+          fill.style.background = pct > 70 ? 'var(--accent2)' : 'var(--accent)';
+        }, 50);
+      }
 
-  // ICE gathering 완료 대기 (최대 3초)
-  await new Promise(resolve => {
-    if (state.pc.iceGatheringState === 'complete') { resolve(); return; }
-    state.pc.onicegatheringstatechange = () => {
-      if (state.pc.iceGatheringState === 'complete') resolve();
-    };
-    setTimeout(resolve, 3000);
-  });
+      // ============================================================
+      // PTT
+      // ============================================================
+      function pttStart() {
+        if (!state.stream || state.pttActive) return;
+        state.pttActive = true;
+        $('ptt-btn').classList.add('active');
+        $('ptt-btn').textContent = '● TRANSMITTING';
+        state.stream.getAudioTracks().forEach((t) => (t.enabled = true));
+      }
 
-  const sdpStr = state.pc.localDescription.sdp;
+      function pttStop() {
+        if (!state.pttActive) return;
+        state.pttActive = false;
+        $('ptt-btn').classList.remove('active');
+        $('ptt-btn').textContent = '● PUSH TO TALK';
+        state.stream?.getAudioTracks().forEach((t) => (t.enabled = false));
+      }
 
-  const ssrcMatch  = sdpStr.match(/a=ssrc:(\d+)/);
-  state.ssrc       = ssrcMatch ? parseInt(ssrcMatch[1]) : randomSSRC();
-
-  const ufragMatch = sdpStr.match(/a=ice-ufrag:(\S+)/);
-  state.ufrag      = ufragMatch ? ufragMatch[1] : `uf${Math.random().toString(36).slice(2,6)}`;
-
-  setState('ssrc', state.ssrc);
-  log('sys', `offer ready — ssrc=${state.ssrc} ufrag=${state.ufrag}`);
-
-  return sdpStr;
-}
-
-// ============================================================
-// 볼륨 미터
-// ============================================================
-function startMeter() {
-  if (!state.stream || state.analyser) return;
-  const ctx      = new AudioContext();
-  const src      = ctx.createMediaStreamSource(state.stream);
-  state.analyser = ctx.createAnalyser();
-  state.analyser.fftSize = 256;
-  src.connect(state.analyser);
-  const data = new Uint8Array(state.analyser.frequencyBinCount);
-  state.meterTimer = setInterval(() => {
-    state.analyser.getByteFrequencyData(data);
-    const avg = data.reduce((a,b) => a+b, 0) / data.length;
-    const pct = Math.min(100, avg * 2.5);
-    const fill = $('meter-fill');
-    fill.style.width      = `${pct}%`;
-    fill.style.background = pct > 70 ? 'var(--accent2)' : 'var(--accent)';
-  }, 50);
-}
-
-// ============================================================
-// PTT
-// ============================================================
-function pttStart() {
-  if (!state.stream || state.pttActive) return;
-  state.pttActive = true;
-  $('ptt-btn').classList.add('active');
-  $('ptt-btn').textContent = '● TRANSMITTING';
-  state.stream.getAudioTracks().forEach(t => t.enabled = true);
-}
-
-function pttStop() {
-  if (!state.pttActive) return;
-  state.pttActive = false;
-  $('ptt-btn').classList.remove('active');
-  $('ptt-btn').textContent = '● PUSH TO TALK';
-  state.stream?.getAudioTracks().forEach(t => t.enabled = false);
-}
-
-// ============================================================
-// 멤버 UI
-// ============================================================
-function addMember(userId, ssrc) {
-  if (document.querySelector(`[data-uid="${userId}"]`)) return;
-  const el = document.createElement('div');
-  el.className   = 'member-item';
-  el.dataset.uid = userId;
-  const initials = userId.replace(/[^a-zA-Z0-9]/g,'').substring(0,2).toUpperCase() || '??';
-  el.innerHTML = `
+      // ============================================================
+      // 멤버 UI
+      // ============================================================
+      function addMember(userId, ssrc) {
+        if (document.querySelector(`[data-uid="${userId}"]`)) return;
+        const el = document.createElement('div');
+        el.className = 'member-item';
+        el.dataset.uid = userId;
+        const initials =
+          userId
+            .replace(/[^a-zA-Z0-9]/g, '')
+            .substring(0, 2)
+            .toUpperCase() || '??';
+        el.innerHTML = `
     <div class="member-avatar">${initials}</div>
     <div class="member-info">
       <div class="member-name">${escHtml(userId)}</div>
-      <div class="member-ssrc">ssrc: ${ssrc||'—'}</div>
+      <div class="member-ssrc">ssrc: ${ssrc || '—'}</div>
     </div>
     <div class="member-speaking" id="spk-${userId}"></div>`;
-  $('member-list').appendChild(el);
-}
+        $('member-list').appendChild(el);
+      }
 
-function removeMember(userId) {
-  document.querySelector(`[data-uid="${userId}"]`)?.remove();
-}
+      function removeMember(userId) {
+        document.querySelector(`[data-uid="${userId}"]`)?.remove();
+      }
 
-// ============================================================
-// 버튼 상태
-// ============================================================
-function setButtons(mode) {
-  const d = (id, v) => $(id).disabled = v;
-  if (mode === 'disconnected') {
-    d('btn-connect',false); d('btn-disconnect',true);
-    d('btn-identify',true); d('btn-create',true);
-    d('btn-join',true);     d('btn-leave',true);
-    d('btn-send',true);     $('chat-input').disabled=true;
-    d('ptt-btn',true);
-  } else if (mode === 'connected') {
-    d('btn-connect',true);  d('btn-disconnect',false);
-    d('btn-identify',false);
-  } else if (mode === 'ready') {
-    d('btn-create',false);  d('btn-join',false);
-  } else if (mode === 'joined') {
-    d('btn-join',true);     d('btn-leave',false);
-    d('btn-send',false);    $('chat-input').disabled=false;
-  }
-}
+      // ============================================================
+      // 버튼 상태
+      // ============================================================
+      function setButtons(mode) {
+        const d = (id, v) => ($(id).disabled = v);
+        if (mode === 'disconnected') {
+          d('btn-connect', false);
+          d('btn-disconnect', true);
+          d('btn-identify', true);
+          d('btn-create', true);
+          d('btn-join', true);
+          d('btn-leave', true);
+          d('btn-send', true);
+          $('chat-input').disabled = true;
+          d('ptt-btn', true);
+        } else if (mode === 'connected') {
+          d('btn-connect', true);
+          d('btn-disconnect', false);
+          d('btn-identify', false);
+        } else if (mode === 'ready') {
+          d('btn-create', false);
+          d('btn-join', false);
+        } else if (mode === 'joined') {
+          d('btn-join', true);
+          d('btn-leave', false);
+          d('btn-send', false);
+          $('chat-input').disabled = false;
+        }
+      }
 
-// ============================================================
-// 버튼 이벤트
-// ============================================================
-$('btn-connect').onclick = () => wsConnect();
+      // ============================================================
+      // 버튼 이벤트
+      // ============================================================
+      $('btn-connect').onclick = () => wsConnect();
 
-$('btn-disconnect').onclick = () => {
-  clearInterval(state.hbTimer);
-  clearInterval(state.meterTimer);
-  state.analyser = null;
-  state.pc?.close(); state.pc = null;
-  state.ws?.close();
-  $('member-list').innerHTML = '';
-  $('sdp-viewer').textContent = '—';
-  $('media-state').textContent = '미디어 비활성';
-  setState('ice','—'); setState('dtls','—'); setState('srtp','—');
-  setBadge('ice-badge','ICE: —'); setBadge('dtls-badge','DTLS: —');
-};
+      $('btn-disconnect').onclick = () => {
+        clearInterval(state.hbTimer);
+        clearInterval(state.meterTimer);
+        state.analyser = null;
+        state.pc?.close();
+        state.pc = null;
+        state.ws?.close();
+        $('member-list').innerHTML = '';
+        $('sdp-viewer').textContent = '—';
+        $('media-state').textContent = '미디어 비활성';
+        setState('ice', '—');
+        setState('dtls', '—');
+        setState('srtp', '—');
+        setBadge('ice-badge', 'ICE: —');
+        setBadge('dtls-badge', 'DTLS: —');
+      };
 
-$('btn-identify').onclick = () => {
-  wsSend({ op: 3, d: {
-    user_id: $('user-id').value.trim(),
-    token:   $('token').value.trim(),
-  }});
-};
+      $('btn-identify').onclick = () => {
+        wsSend({
+          op: 3,
+          d: {
+            user_id: $('user-id').value.trim(),
+            token: $('token').value.trim(),
+          },
+        });
+      };
 
-$('btn-create').onclick = () => {
-  const ch = $('channel-id').value.trim();
-  wsSend({ op: 10, d: { channel_id: ch, channel_name: ch }});
-};
+      $('btn-create').onclick = () => {
+        const ch = $('channel-id').value.trim();
+        wsSend({ op: 10, d: { channel_id: ch, channel_name: ch } });
+      };
 
-$('btn-join').onclick = async () => {
-  const ch = $('channel-id').value.trim();
-  if (!ch) { log('sys','channel_id 필요','err'); return; }
+      $('btn-join').onclick = async () => {
+        const ch = $('channel-id').value.trim();
+        if (!ch) {
+          log('sys', 'channel_id 필요', 'err');
+          return;
+        }
 
-  let sdpOffer = null;
-  if (window.RTCPeerConnection) {
-    sdpOffer = await setupWebRTC();
-  }
+        let sdpOffer = null;
+        if (window.RTCPeerConnection) {
+          sdpOffer = await setupWebRTC();
+        }
 
-  wsSend({ op: 11, d: {
-    channel_id: ch,
-    ssrc:       state.ssrc  || randomSSRC(),
-    ufrag:      state.ufrag || `uf${Math.random().toString(36).slice(2,6)}`,
-    sdp_offer:  sdpOffer,
-  }});
-};
+        wsSend({
+          op: 11,
+          d: {
+            channel_id: ch,
+            ssrc: state.ssrc || randomSSRC(),
+            ufrag: state.ufrag || `uf${Math.random().toString(36).slice(2, 6)}`,
+            sdp_offer: sdpOffer,
+          },
+        });
+      };
 
-$('btn-leave').onclick = () => {
-  if (!state.channel) return;
-  wsSend({ op: 12, d: { channel_id: state.channel }});
-  state.channel = null;
-  setState('channel','—');
-  $('member-list').innerHTML = '';
-  $('sdp-viewer').textContent = '—';
-  pttStop();
-  state.pc?.close(); state.pc = null;
-  setButtons('ready');
-};
+      $('btn-leave').onclick = () => {
+        if (!state.channel) return;
+        wsSend({ op: 12, d: { channel_id: state.channel } });
+        state.channel = null;
+        setState('channel', '—');
+        $('member-list').innerHTML = '';
+        $('sdp-viewer').textContent = '—';
+        pttStop();
+        state.pc?.close();
+        state.pc = null;
+        setButtons('ready');
+      };
 
-function sendChat() {
-  const txt = $('chat-input').value.trim();
-  if (!txt || !state.channel) return;
-  wsSend({ op: 20, d: { channel_id: state.channel, content: txt }});
-  $('chat-input').value = '';
-}
-$('btn-send').onclick = sendChat;
-$('chat-input').onkeydown = e => { if (e.key === 'Enter') sendChat(); };
+      function sendChat() {
+        const txt = $('chat-input').value.trim();
+        if (!txt || !state.channel) return;
+        wsSend({ op: 20, d: { channel_id: state.channel, content: txt } });
+        $('chat-input').value = '';
+      }
+      $('btn-send').onclick = sendChat;
+      $('chat-input').onkeydown = (e) => {
+        if (e.key === 'Enter') sendChat();
+      };
 
-$('btn-clear').onclick = () => { $('log-area').innerHTML = ''; };
+      $('btn-clear').onclick = () => {
+        $('log-area').innerHTML = '';
+      };
 
-// PTT
-const pttBtn = $('ptt-btn');
-pttBtn.onmousedown  = () => pttStart();
-pttBtn.onmouseup    = () => pttStop();
-pttBtn.onmouseleave = () => pttStop();
-pttBtn.ontouchstart = e => { e.preventDefault(); pttStart(); };
-pttBtn.ontouchend   = e => { e.preventDefault(); pttStop(); };
+      // PTT
+      const pttBtn = $('ptt-btn');
+      pttBtn.onmousedown = () => pttStart();
+      pttBtn.onmouseup = () => pttStop();
+      pttBtn.onmouseleave = () => pttStop();
+      pttBtn.ontouchstart = (e) => {
+        e.preventDefault();
+        pttStart();
+      };
+      pttBtn.ontouchend = (e) => {
+        e.preventDefault();
+        pttStop();
+      };
 
-document.addEventListener('keydown', e => {
-  if (e.code === 'Space' && !e.repeat && !e.target.matches('input')) {
-    e.preventDefault(); pttStart();
-  }
-});
-document.addEventListener('keyup', e => {
-  if (e.code === 'Space') { e.preventDefault(); pttStop(); }
-});
+      document.addEventListener('keydown', (e) => {
+        if (e.code === 'Space' && !e.repeat && !e.target.matches('input')) {
+          e.preventDefault();
+          pttStart();
+        }
+      });
+      document.addEventListener('keyup', (e) => {
+        if (e.code === 'Space') {
+          e.preventDefault();
+          pttStop();
+        }
+      });
 
-// ============================================================
-// 초기화
-// ============================================================
-log('sys', 'mini-livechat E2E client ready');
-log('sys', 'SPACEBAR = PTT while in channel');
-</script>
-</body>
+      // ============================================================
+      // 초기화
+      // ============================================================
+      log('sys', 'mini-livechat E2E client ready');
+      log('sys', 'SPACEBAR = PTT while in channel');
+    </script>
+  </body>
 </html>

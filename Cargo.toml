@@ -33,6 +33,10 @@ webrtc-util = "0.17.1"
 sha2               = "0.10"
 rustls-pki-types   = "1"
 async-trait = "0.1"
+rand        = "0.8"
+hmac        = "0.12"
+sha-1       = "0.10"
+crc32fast   = "1"
 
 [dev-dependencies]
 # 통합 테스트용 WS 클라이언트

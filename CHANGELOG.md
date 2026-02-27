@@ -89,8 +89,47 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.12.0] - 2026-02-27
+
+### 브라우저 E2E ICE+DTLS 연결 성공
+
+#### Cargo.toml
+- `rand = "0.8"` 추가 — ICE ufrag/pwd CSPRNG 생성
+- `hmac = "0.12"`, `sha-1 = "0.10"`, `crc32fast = "1"` 추가 — STUN MESSAGE-INTEGRITY/FINGERPRINT
+
+#### protocol/protocol.rs
+- `detect_local_ip()` 추가: UDP 소켓으로 8.8.8.8:80 connect → local_addr() 조회 (라우팅 테이블 기반, 멀티홈 환경 대응)
+- `random_ice_string()` 교체: xorshift → `rand::thread_rng()` CSPRNG, charset에서 `+/` 제거 (RFC 준수)
+- `build_sdp_answer()` 반환 타입 변경: `String` → `(String, String, String)` (sdp, server_ufrag, server_pwd)
+  - ufrag 길이 4 → 16자 (RFC 8445 범위 내, 충돌 방지)
+  - `a=group:BUNDLE` 세션 헤더에 추가 (필수)
+  - `m=` 포트를 offer 더미값 9 → `SERVER_UDP_PORT`로 교체
+  - `c=IN IP4` 실제 서버 IP로 교체
+  - `a=candidate` IP를 `detect_local_ip()` 결과로 교체
+- `handle_channel_join()`: MediaPeerHub 등록 키를 client ufrag → server ufrag로 변경
+  - STUN USERNAME = `server_ufrag:client_ufrag` 구조에 맞춤
+  - `ice_pwd`를 Endpoint에 함께 저장
+
+#### core.rs
+- `Endpoint`에 `ice_pwd: String` 필드 추가
+- `Endpoint::new()`, `MediaPeerHub::insert()` 시그니처에 `ice_pwd` 파라미터 추가
+
+#### media/net.rs
+- `parse_stun_username()`: `nth(1)` → `nth(0)` (client ufrag → server ufrag로 조회)
+- `make_binding_response()`: `ice_pwd` 파라미터 추가
+  - `MESSAGE-INTEGRITY`: HMAC-SHA1(key=ice_pwd) 추가 — 브라우저 필수 검증
+  - `FINGERPRINT`: CRC32 XOR 0x5354554E 추가
+  - RFC 5389 length 필드 단계별 업데이트 로직 구현
+- `handle_stun()`: latch 후 `ep.ice_pwd` 꺼내서 `make_binding_response()`에 전달
+
+#### 결과
+- ICE: `checking` → `connected` → `completed` ✅
+- DTLS: `connected` ✅  
+- SRTP 패킷 수신: Opus 73bytes @ 20ms 간격 ✅
+
 ## [TODO] (다음 세션)
-- 실제 브라우저 연동 E2E 테스트
+- SRTP 복호화 키 설치 (DTLS keying material → SrtpContext)
+- 복호화 후 채널 내 다른 피어로 릴레이
 
 ---
 

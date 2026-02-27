@@ -197,6 +197,7 @@ pub struct Track {
 /// 피어당 엔드포인트 (Phase 2 확장 대비 필드 포함)
 pub struct Endpoint {
     pub ufrag:      String,             // ICE ufrag — 주키, 불변
+    pub ice_pwd:    String,             // ICE pwd — STUN MESSAGE-INTEGRITY 검증용
     pub user_id:    String,
     pub channel_id: String,
     pub last_seen:  AtomicU64,          // 좌비 피어 감지용
@@ -214,10 +215,11 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    pub fn new(ufrag: String, user_id: String, channel_id: String) -> Self {
+    pub fn new(ufrag: String, ice_pwd: String, user_id: String, channel_id: String) -> Self {
         trace!("Endpoint::new ufrag={} user={} channel={}", ufrag, user_id, channel_id);
         Self {
             ufrag,
+            ice_pwd,
             user_id,
             channel_id,
             last_seen:     AtomicU64::new(current_timestamp()),
@@ -269,9 +271,10 @@ impl MediaPeerHub {
     }
 
     /// WS CHANNEL_JOIN 시 등록 — ufrag는 SDP 교환 후 확정
-    pub fn insert(&self, ufrag: &str, user_id: &str, channel_id: &str) -> Arc<Endpoint> {
+    pub fn insert(&self, ufrag: &str, ice_pwd: &str, user_id: &str, channel_id: &str) -> Arc<Endpoint> {
         let ep = Arc::new(Endpoint::new(
             ufrag.to_string(),
+            ice_pwd.to_string(),
             user_id.to_string(),
             channel_id.to_string(),
         ));

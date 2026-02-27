@@ -118,14 +118,18 @@ async fn handle_stun(
         None    => { debug!("[stun] no USERNAME, dropping"); return; }
     };
 
-    match hub.latch(&ufrag, src_addr) {
-        Some(ep) => trace!("[stun] latched ufrag={} user={} addr={}", ufrag, ep.user_id, src_addr),
+    let ep = match hub.latch(&ufrag, src_addr) {
+        Some(ep) => { trace!("[stun] latched ufrag={} user={} addr={}", ufrag, ep.user_id, src_addr); ep }
         None     => { debug!("[stun] unknown ufrag={}, dropping", ufrag); return; }
-    }
+    };
 
-    if let Some(resp) = make_binding_response(packet, src_addr) {
+    // MESSAGE-INTEGRITY + FINGERPRINT 포함 Binding Response 전송
+    // ice_pwd: 서버가 SDP answer에 넣어준 pwd → HMAC-SHA1 서명 키
+    if let Some(resp) = make_binding_response(packet, src_addr, &ep.ice_pwd) {
         if let Err(e) = socket.send_to(&resp, src_addr).await {
             warn!("[stun] response failed: {}", e);
+        } else {
+            trace!("[stun] Binding Response sent to {}", src_addr);
         }
     }
 }
@@ -273,8 +277,10 @@ fn parse_stun_username(packet: &[u8]) -> Option<String> {
 
         if attr_type == USERNAME_TYPE {
             let username = std::str::from_utf8(&packet[offset..offset + attr_len]).ok()?;
-            let client_ufrag = username.split(':').nth(1).unwrap_or(username);
-            return Some(client_ufrag.to_string());
+            // USERNAME = "server_ufrag:client_ufrag"
+            // 서버 ufrag(nth(0))로 MediaPeerHub 조회 — 서버가 생성한 16자 ufrag
+            let server_ufrag = username.split(':').next().unwrap_or(username);
+            return Some(server_ufrag.to_string());
         }
 
         // 4바이트 정렬 패딩 skip
@@ -284,38 +290,73 @@ fn parse_stun_username(packet: &[u8]) -> Option<String> {
     None
 }
 
-/// STUN Binding Response 생성 (XOR-MAPPED-ADDRESS 포함)
-fn make_binding_response(request: &[u8], src_addr: std::net::SocketAddr) -> Option<Vec<u8>> {
+/// STUN Binding Response 생성
+/// XOR-MAPPED-ADDRESS + MESSAGE-INTEGRITY (HMAC-SHA1) + FINGERPRINT (CRC32) 포함
+/// RFC 5389 필수 속성 — 빠지면 브라우저가 응답을 무시함
+fn make_binding_response(
+    request:  &[u8],
+    src_addr: std::net::SocketAddr,
+    ice_pwd:  &str,
+) -> Option<Vec<u8>> {
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+
     if request.len() < 20 { return None; }
 
-    let mut resp = Vec::with_capacity(32);
-
-    // STUN 헤더
-    resp.extend_from_slice(&[0x01, 0x01]);            // Binding Response
-    resp.extend_from_slice(&[0x00, 0x0C]);            // length = 12
-    resp.extend_from_slice(&[0x21, 0x12, 0xA4, 0x42]); // Magic Cookie
-    resp.extend_from_slice(&request[8..20]);           // Transaction ID
-
-    // XOR-MAPPED-ADDRESS
-    resp.extend_from_slice(&[0x00, 0x20]); // type
-    resp.extend_from_slice(&[0x00, 0x08]); // length = 8
-
     const MAGIC: u32 = 0x2112A442;
+
+    // 헤더 (20바이트): length는 나중에 채움
+    let mut resp = Vec::with_capacity(80);
+    resp.extend_from_slice(&[0x01, 0x01]);              // Binding Success Response
+    resp.extend_from_slice(&[0x00, 0x00]);              // length placeholder
+    resp.extend_from_slice(&[0x21, 0x12, 0xA4, 0x42]); // Magic Cookie
+    resp.extend_from_slice(&request[8..20]);            // Transaction ID 복사
+
+    // XOR-MAPPED-ADDRESS (12바이트)
     match src_addr {
         std::net::SocketAddr::V4(v4) => {
-            resp.push(0x00); // reserved
-            resp.push(0x01); // family IPv4
+            resp.extend_from_slice(&[0x00, 0x20]); // attr type
+            resp.extend_from_slice(&[0x00, 0x08]); // attr length = 8
+            resp.push(0x00);                        // reserved
+            resp.push(0x01);                        // family: IPv4
             let xor_port = src_addr.port() ^ (MAGIC >> 16) as u16;
             resp.extend_from_slice(&xor_port.to_be_bytes());
-            let ip_u32 = u32::from(*v4.ip());
-            let xor_ip = ip_u32 ^ MAGIC;
+            let xor_ip = u32::from(*v4.ip()) ^ MAGIC;
             resp.extend_from_slice(&xor_ip.to_be_bytes());
         }
-        std::net::SocketAddr::V6(_) => {
-            // IPv6는 Phase 3에서 처리
-            return None;
-        }
+        std::net::SocketAddr::V6(_) => return None, // IPv6는 Phase 3
     }
+
+    // MESSAGE-INTEGRITY (24바이트): HMAC-SHA1(key=ice_pwd, msg=헤더~여기직전)
+    // RFC 5389: length 필드를 이 attribute가 끝나는 시점의 길이로 업데이트한 후 HMAC 계산
+    let msg_integrity_len = (resp.len() - 20 + 24) as u16; // XOR-MAP(12) + MI(24) = 36
+    resp[2] = (msg_integrity_len >> 8) as u8;
+    resp[3] = (msg_integrity_len & 0xFF) as u8;
+
+    let mut mac = Hmac::<Sha1>::new_from_slice(ice_pwd.as_bytes())
+        .expect("HMAC 키 오류");
+    mac.update(&resp);
+    let hmac_bytes = mac.finalize().into_bytes();
+
+    resp.extend_from_slice(&[0x00, 0x08]); // attr type: MESSAGE-INTEGRITY
+    resp.extend_from_slice(&[0x00, 0x14]); // attr length = 20 (SHA1 크기)
+    resp.extend_from_slice(&hmac_bytes);
+
+    // FINGERPRINT (8바이트): CRC32(packet) XOR 0x5354554E
+    // RFC 5389: length 필드를 FINGERPRINT가 끝나는 시점으로 업데이트 후 CRC 계산
+    let fingerprint_len = (resp.len() - 20 + 8) as u16;
+    resp[2] = (fingerprint_len >> 8) as u8;
+    resp[3] = (fingerprint_len & 0xFF) as u8;
+
+    let crc = crc32fast::hash(&resp) ^ 0x5354_554E;
+    resp.extend_from_slice(&[0x80, 0x28]); // attr type: FINGERPRINT
+    resp.extend_from_slice(&[0x00, 0x04]); // attr length = 4
+    resp.extend_from_slice(&crc.to_be_bytes());
+
+    // 최종 length 필드 업데이트 (헤더 20바이트 제외한 나머지)
+    let final_len = (resp.len() - 20) as u16;
+    resp[2] = (final_len >> 8) as u8;
+    resp[3] = (final_len & 0xFF) as u8;
 
     Some(resp)
 }

@@ -220,17 +220,24 @@ async fn handle_channel_join(
         .ok_or_else(|| LiveError::ChannelNotFound(payload.channel_id.clone()))?;
     channel.add_member(&user_id)?;
 
-    // 2. Endpoint 등록 (ufrag 주키, ssrc는 Track 메타데이터)
-    let ep = state.media_peer_hub.insert(&payload.ufrag, &user_id, &payload.channel_id);
+    // 3. SDP answer 생성 (offer가 있을 때만)
+    // server_ufrag: 서버가 생성한 ICE ufrag → MediaPeerHub 등록 키
+    // STUN USERNAME = "server_ufrag:client_ufrag" 구조이므로 서버 ufrag로 조회해야 함
+    let (sdp_answer, ep_ufrag, ep_pwd) = match payload.sdp_offer.as_deref() {
+        Some(offer) => {
+            let (sdp, server_ufrag, server_pwd) = build_sdp_answer(offer, &state.server_cert.fingerprint);
+            (Some(sdp), server_ufrag, server_pwd)
+        }
+        None => (None, payload.ufrag.clone(), String::new()),
+    };
+
+    // 2. Endpoint 등록 (server_ufrag 주키, ice_pwd 포함)
+    let ep = state.media_peer_hub.insert(&ep_ufrag, &ep_pwd, &user_id, &payload.channel_id);
     ep.add_track(payload.ssrc, crate::core::TrackKind::Audio);
 
     session.current_channel = Some(payload.channel_id.clone());
     session.current_ssrc    = Some(payload.ssrc);
-    session.current_ufrag   = Some(payload.ufrag.clone());
-
-    // 3. SDP answer 생성 (offer가 있을 때만)
-    let sdp_answer = payload.sdp_offer.as_deref()
-        .map(|offer| build_sdp_answer(offer, &state.server_cert.fingerprint));
+    session.current_ufrag   = Some(ep_ufrag);
 
     // 4. 본인에게 ACK (SDP answer + 현재 채널 멤버 목록 포함)
     let active_members = collect_members(&payload.channel_id, state);
@@ -506,94 +513,139 @@ fn collect_members(channel_id: &str, state: &AppState) -> Vec<MemberInfo> {
 //   - a=setup:passive (서버는 항상 passive)
 // ----------------------------------------------------------------------------
 
-fn build_sdp_answer(offer: &str, fingerprint: &str) -> String {
-    // offer에서 필요한 정보 추출
-    let session_id  = crate::utils::current_timestamp();
-    let server_ufrag = random_ice_string(4);
-    let server_pwd   = random_ice_string(22);
+/// SDP answer 조립 후 (sdp_string, server_ufrag, server_pwd) 반환
+/// server_ufrag: MediaPeerHub 등록 키
+/// server_pwd:   STUN MESSAGE-INTEGRITY 서명 키
+fn build_sdp_answer(offer: &str, fingerprint: &str) -> (String, String, String) {
+    // --------------------------------------------------------------------
+    // SDP Answer 조립 규칙
+    //
+    // 1. 세션 헤더: v=, o=, s=, t=, BUNDLE 그룹, ice-lite
+    // 2. 미디어 섹션: offer의 audio 섹션 1개만 처리
+    //    - m= 포트를 SERVER_UDP_PORT 로 교체 (offer의 9는 더미)
+    //    - 코덱 라인(a=rtpmap, a=fmtp, a=extmap, a=mid 등) 미러링
+    //    - ICE/DTLS/방향 라인은 서버 값으로 교체
+    //    - sendrecv/sendonly → recvonly
+    // 3. ICE candidate: 라우팅 테이블 기반 로컬 IP 자동 감지
+    // --------------------------------------------------------------------
 
-    // offer의 미디어 섹션(m= 이후) 수집
-    // audio/video 코덱 라인(a=rtpmap, a=fmtp, a=extmap 등) 미러링
-    let mut media_sections = Vec::new();
-    let mut in_media = false;
-    let mut current_section: Vec<&str> = Vec::new();
-    let mut media_type = "";
+    let session_id   = crate::utils::current_timestamp();
+    let server_ufrag = random_ice_string(16);
+    let server_pwd   = random_ice_string(22);
+    let local_ip     = detect_local_ip();
+    let udp_port     = crate::config::SERVER_UDP_PORT;
+
+    // offer에서 audio 미디어 섹션의 코덱 관련 라인만 수집
+    // (ICE/DTLS/방향/c= 제외 — 서버 값으로 교체)
+    let skip_prefixes = [
+        "a=ice-", "a=fingerprint", "a=setup", "a=candidate",
+        "a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive",
+        "a=rtcp-mux", "a=rtcp-rsize", "c=",
+    ];
+
+    let mut mid = "0".to_string();
+    let mut m_line = format!("m=audio {} UDP/TLS/RTP/SAVPF 111", udp_port); // 폴백
+    let mut codec_lines: Vec<String> = Vec::new();
+    let mut in_audio = false;
 
     for line in offer.lines() {
-        if line.starts_with("m=") {
-            if in_media && !current_section.is_empty() {
-                media_sections.push((media_type, current_section.clone()));
+        if line.starts_with("m=audio") {
+            in_audio = true;
+            // m= 라인: 포트만 서버 UDP 포트로 교체, 나머지(코덱 목록)는 그대로
+            // "m=audio 9 UDP/TLS/RTP/SAVPF 111 63 ..." → "m=audio 10000 UDP/TLS/RTP/SAVPF 111 63 ..."
+            let parts: Vec<&str> = line.splitn(4, ' ').collect();
+            if parts.len() == 4 {
+                m_line = format!("m=audio {} {} {}", udp_port, parts[2], parts[3]);
             }
-            in_media = true;
-            media_type = if line.starts_with("m=audio") { "audio" }
-                         else if line.starts_with("m=video") { "video" }
-                         else { "other" };
-            current_section = vec![line];
-        } else if in_media {
-            // ICE/DTLS 관련 offer 라인은 제외 (서버 것으로 교체)
-            if line.starts_with("a=ice-")       ||
-               line.starts_with("a=fingerprint")||
-               line.starts_with("a=setup")      ||
-               line.starts_with("a=candidate")  ||
-               line.starts_with("c=") {
-                continue;
-            }
-            // sendrecv/sendonly → recvonly로 방향 전환
-            if line == "a=sendrecv" || line == "a=sendonly" {
-                current_section.push("a=recvonly");
-            } else {
-                current_section.push(line);
-            }
+            continue;
         }
-    }
-    if in_media && !current_section.is_empty() {
-        media_sections.push((media_type, current_section));
+        if line.starts_with("m=") {
+            in_audio = false;
+            continue;
+        }
+        if !in_audio { continue; }
+
+        if skip_prefixes.iter().any(|p| line.starts_with(p)) { continue; }
+
+        // a=mid 값 캡처 (BUNDLE에서 필요)
+        if line.starts_with("a=mid:") {
+            mid = line["a=mid:".len()..].trim().to_string();
+        }
+
+        codec_lines.push(line.to_string());
     }
 
     // answer 조립
     let mut sdp = String::new();
 
-    // 세션 헤더
+    // --- 세션 헤더 ---
     sdp.push_str("v=0\r\n");
-    sdp.push_str(&format!("o=mini-livechat {} {} IN IP4 0.0.0.0\r\n", session_id, session_id));
+    sdp.push_str(&format!("o=mini-livechat {0} {0} IN IP4 {1}\r\n", session_id, local_ip));
     sdp.push_str("s=-\r\n");
     sdp.push_str("t=0 0\r\n");
-    sdp.push_str("a=ice-lite\r\n"); // 서버는 ICE Lite
+    sdp.push_str(&format!("a=group:BUNDLE {}\r\n", mid)); // BUNDLE 필수
+    sdp.push_str("a=ice-lite\r\n");                       // 서버는 ICE Lite
 
-    // 미디어 섹션
-    for (_mtype, lines) in &media_sections {
-        for line in lines {
-            sdp.push_str(line);
-            sdp.push_str("\r\n");
-        }
-        sdp.push_str("c=IN IP4 0.0.0.0\r\n");
-        sdp.push_str(&format!("a=ice-ufrag:{}\r\n", server_ufrag));
-        sdp.push_str(&format!("a=ice-pwd:{}\r\n", server_pwd));
-        sdp.push_str(&format!("a=fingerprint:{}\r\n", fingerprint));
-        sdp.push_str("a=setup:passive\r\n");    // 서버는 DTLS passive
-        sdp.push_str("a=rtcp-mux\r\n");
+    // --- 미디어 섹션 (audio 1개) ---
+    // m= 라인: offer에서 코덱 목록 그대로, 포트만 서버 UDP 포트로 교체
+    sdp.push_str(&m_line);
+    sdp.push_str("\r\n");
+    sdp.push_str(&format!("c=IN IP4 {}\r\n", local_ip));
+
+    // ICE 크리덴셜
+    sdp.push_str(&format!("a=ice-ufrag:{}\r\n", server_ufrag));
+    sdp.push_str(&format!("a=ice-pwd:{}\r\n", server_pwd));
+
+    // DTLS
+    sdp.push_str(&format!("a=fingerprint:{}\r\n", fingerprint));
+    sdp.push_str("a=setup:passive\r\n"); // 서버는 항상 passive
+
+    // 미디어 속성
+    sdp.push_str("a=rtcp-mux\r\n");
+    sdp.push_str("a=rtcp-rsize\r\n");
+    sdp.push_str("a=recvonly\r\n");      // 서버는 수신 전용
+
+    // offer에서 미러링한 코덱 라인들
+    for line in &codec_lines {
+        sdp.push_str(line);
+        sdp.push_str("\r\n");
     }
 
-    sdp
+    // ICE candidate (ICE Lite이므로 host 후보 1개만)
+    sdp.push_str(&format!(
+        "a=candidate:1 1 udp 2113937151 {} {} typ host generation 0\r\n",
+        local_ip, udp_port
+    ));
+    sdp.push_str("a=end-of-candidates\r\n");
+
+    (sdp, server_ufrag, server_pwd)
+}
+
+/// 라우팅 테이블 기반 로컬 IP 자동 감지
+/// UDP 소켓으로 8.8.8.8:80 connect (실제 패킷 없음) → local_addr() 조회
+/// 멀티홈 환경에서도 외부 통신에 실제로 쓰이는 인터페이스 IP가 정확히 반환됨
+fn detect_local_ip() -> String {
+    use std::net::UdpSocket;
+    UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| { s.connect("8.8.8.8:80")?; s.local_addr() })
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|_| {
+            tracing::warn!("로컬 IP 감지 실패 — 127.0.0.1 폴백");
+            "127.0.0.1".to_string()
+        })
 }
 
 /// ICE ufrag/pwd용 랜덤 문자열 생성 (alphanumeric)
+/// - rand 크레이트 기반 CSPRNG 사용 (xorshift 대비 충돌 안전)
+/// - ufrag: 16자 권장 (RFC 8445 범위 4~256, 62^16 ≈ 4.7×10^28)
+/// - pwd:   22자 (RFC 최솟값 준수)
 fn random_ice_string(len: usize) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // 외부 rand 크레이트 없이 타임스탬프 기반으로 간단 생성
-    // 운영 환경에서는 rand 크레이트 사용 권장
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as u64;
-    let charset: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/";
-    let mut val = seed ^ (seed << 13) ^ (seed >> 7); // xorshift
-    (0..len).map(|_| {
-        val ^= val << 13;
-        val ^= val >> 7;
-        val ^= val << 17;
-        charset[(val as usize) % charset.len()] as char
-    }).collect()
+    use rand::Rng;
+    let charset: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut rng = rand::thread_rng();
+    (0..len)
+        .map(|_| charset[rng.gen_range(0..charset.len())] as char)
+        .collect()
 }
 
 /// WS 종료 시 클린업
