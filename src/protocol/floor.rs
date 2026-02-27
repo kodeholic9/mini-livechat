@@ -72,22 +72,22 @@ fn decide_next(
     channel_id: &str,
     floor:      &mut FloorControl,
     members:    &std::collections::HashSet<String>,
-) -> Vec<(Option<String>, String)> {
-    let _ = members; // 현재 미사용 — dispatch 단계에서 broadcast_to에 전달
-    let mut packets: Vec<(Option<String>, String)> = Vec::new();
+) -> Vec<(Option<String>, Option<String>, String)> {
+    let _ = members;
+    let mut packets: Vec<(Option<String>, Option<String>, String)> = Vec::new();
 
     if let Some(next) = floor.dequeue_next() {
         floor.grant(next.user_id.clone(), next.priority, next.indicator.clone());
 
-        // 다음 holder에게 직접 전송
-        packets.push((Some(next.user_id.clone()), make_packet(server::FLOOR_GRANTED, FloorGrantedPayload {
+        // 다음 holder에게만 FLOOR_GRANTED
+        packets.push((Some(next.user_id.clone()), None, make_packet(server::FLOOR_GRANTED, FloorGrantedPayload {
             channel_id: channel_id.to_string(),
             user_id:    next.user_id.clone(),
             duration:   config::FLOOR_MAX_TAKEN_MS,
         })));
 
-        // 채널 전체 브로드캐스트 (None = 전체)
-        packets.push((None, make_packet(server::FLOOR_TAKEN, FloorTakenPayload {
+        // FLOOR_TAKEN: 나머지 멤버에게만 (holder 제외)
+        packets.push((None, Some(next.user_id.clone()), make_packet(server::FLOOR_TAKEN, FloorTakenPayload {
             channel_id: channel_id.to_string(),
             user_id:    next.user_id.clone(),
             indicator:  indicator_to_dto(&next.indicator),
@@ -97,8 +97,8 @@ fn decide_next(
     } else {
         floor.clear_taken();
 
-        // 채널 전체 브로드캐스트
-        packets.push((None, make_packet(server::FLOOR_IDLE, FloorIdlePayload {
+        // FLOOR_IDLE: 전체에게
+        packets.push((None, None, make_packet(server::FLOOR_IDLE, FloorIdlePayload {
             channel_id: channel_id.to_string(),
         })));
 
@@ -109,12 +109,16 @@ fn decide_next(
 }
 
 /// decide_next 결과 전송 (lock 해제 후 호출)
+/// (target, exclude, json)
+///   target=None  : 전체 브로드캐스트
+///   target=Some  : 특정 유저에게만
+///   exclude=Some : 브로드캐스트 시 제외할 유저
 async fn dispatch_packets(
-    packets:  Vec<(Option<String>, String)>,
+    packets:  Vec<(Option<String>, Option<String>, String)>,
     members:  &std::collections::HashSet<String>,
     user_hub: &Arc<UserHub>,
 ) {
-    for (target, json) in packets {
+    for (target, exclude, json) in packets {
         match target {
             Some(uid) => {
                 if let Some(user) = user_hub.get(&uid) {
@@ -122,7 +126,7 @@ async fn dispatch_packets(
                 }
             }
             None => {
-                user_hub.broadcast_to(members, &json, None).await;
+                user_hub.broadcast_to(members, &json, exclude.as_deref()).await;
             }
         }
     }
@@ -226,7 +230,8 @@ pub async fn handle_floor_request(
     match action {
         Action::Granted { granted_json, taken_json } => {
             send(tx, granted_json).await?;
-            user_hub.broadcast_to(&members, &taken_json, None).await;
+            // FLOOR_TAKEN은 본인 제외 나머지 멤버에게만 — 본인은 FLOOR_GRANTED로 충분
+            user_hub.broadcast_to(&members, &taken_json, Some(user_id)).await;
             trace!("Floor Granted (Idle→Taken): channel={} user={}", channel_id, user_id);
         }
         Action::Preempt { revoke_json, granted_json, taken_json, old_holder } => {
@@ -234,7 +239,8 @@ pub async fn handle_floor_request(
                 let _ = holder_user.tx.send(revoke_json).await;
             }
             send(tx, granted_json).await?;
-            user_hub.broadcast_to(&members, &taken_json, None).await;
+            // FLOOR_TAKEN은 본인 제외
+            user_hub.broadcast_to(&members, &taken_json, Some(user_id)).await;
             warn!("Floor Preempted: channel={} old={} new={}", channel_id, old_holder, user_id);
         }
         Action::Queued { pos_json } => {
@@ -329,7 +335,7 @@ pub async fn run_floor_ping_task(
             // 패턴: lock → 결정 → drop → await
             enum PingAction {
                 Skip,
-                Revoke { cause: String, holder: String, revoke_json: String, packets: Vec<(Option<String>, String)>, members: std::collections::HashSet<String> },
+                Revoke { cause: String, holder: String, revoke_json: String, packets: Vec<(Option<String>, Option<String>, String)>, members: std::collections::HashSet<String> },
                 Ping   { holder: String, ping_json: String },
             }
 

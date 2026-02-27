@@ -45,11 +45,16 @@ pub type DtlsPacketTx = mpsc::Sender<Vec<u8>>;
 
 pub struct DtlsSessionMap {
     sessions: RwLock<HashMap<SocketAddr, DtlsPacketTx>>,
+    /// STUN latch 전에 도착한 DTLS 패킷 임시 보관 (addr → Vec<packet>)
+    pending:  RwLock<HashMap<SocketAddr, Vec<Vec<u8>>>>,
 }
 
 impl DtlsSessionMap {
     pub fn new() -> Self {
-        Self { sessions: RwLock::new(HashMap::new()) }
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+            pending:  RwLock::new(HashMap::new()),
+        }
     }
 
     pub async fn insert(&self, addr: SocketAddr, tx: DtlsPacketTx) {
@@ -68,6 +73,18 @@ impl DtlsSessionMap {
         } else {
             false
         }
+    }
+
+    /// latch 전 도착한 DTLS 패킷을 pending 큐에 저장
+    pub async fn enqueue_pending(&self, addr: SocketAddr, packet: Vec<u8>) {
+        let mut pending = self.pending.write().await;
+        pending.entry(addr).or_default().push(packet);
+        debug!("[dtls-map] pending DTLS packet queued addr={}", addr);
+    }
+
+    /// latch 완료 시 해당 addr의 pending 패킷 모두 꺼내서 반환
+    pub async fn drain_pending(&self, addr: &SocketAddr) -> Vec<Vec<u8>> {
+        self.pending.write().await.remove(addr).unwrap_or_default()
     }
 
     /// tx가 닫힌 세션 = 핸드셰이크 태스크 종료 또는 타임아웃
@@ -123,14 +140,20 @@ impl ServerCert {
 // ============================================================================
 
 pub async fn start_dtls_handshake(
-    socket:      Arc<UdpSocket>,
-    peer_addr:   SocketAddr,
-    endpoint:    Arc<Endpoint>,
-    cert:        Arc<ServerCert>,
-    session_map: Arc<DtlsSessionMap>,
+    socket:          Arc<UdpSocket>,
+    peer_addr:       SocketAddr,
+    endpoint:        Arc<Endpoint>,
+    cert:            Arc<ServerCert>,
+    session_map:     Arc<DtlsSessionMap>,
+    initial_packets: Vec<Vec<u8>>,   // pending 큐에서 drain한 패킷들 (비어도 OK)
 ) {
     let (adapter, pkt_tx) = UdpConnAdapter::new(Arc::clone(&socket), peer_addr);
-    session_map.insert(peer_addr, pkt_tx).await;
+    session_map.insert(peer_addr, pkt_tx.clone()).await;
+
+    // pending 패킷 주입 (핸드셰이크 시작 전에 도착한 ClientHello 등)
+    for pkt in initial_packets {
+        if pkt_tx.send(pkt).await.is_err() { break; }
+    }
 
     let session_map2 = Arc::clone(&session_map);
     tokio::spawn(async move {

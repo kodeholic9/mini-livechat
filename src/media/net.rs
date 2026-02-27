@@ -13,7 +13,7 @@ use tokio::net::UdpSocket;
 use tracing::{debug, info, trace, warn};
 
 use crate::config;
-use crate::core::MediaPeerHub;
+use crate::core::{ChannelHub, FloorControlState, MediaPeerHub};
 use crate::media::dtls::{DtlsSessionMap, ServerCert, start_dtls_handshake};
 
 const UDP_RECV_BUF_SIZE: usize = 65535;
@@ -35,13 +35,21 @@ enum PacketKind {
     Unknown,
 }
 
+// RFC 7983 §7 demultiplexing:
+//   [0,   3]  → STUN
+//   [16,  19] → ZRTP  (무시)
+//   [20,  63] → DTLS
+//   [64, 127] → TURN  (무시)
+//   [128,191] → RTP/RTCP  ← 0x80~0xBF
+//   [192,255] → 기타
+// 주의: 기존 코드는 0x80 이상 전체를 SRTP로 처리 — RTCP(0xC8~등)도 포함됨
 #[inline]
 fn classify(buf: &[u8]) -> PacketKind {
     match buf.first() {
-        Some(0x00) | Some(0x01)              => PacketKind::Stun,
-        Some(b) if *b >= 0x14 && *b <= 0x1F => PacketKind::Dtls,
-        Some(b) if *b >= 0x80               => PacketKind::Srtp,
-        _                                    => PacketKind::Unknown,
+        Some(b) if *b <= 3               => PacketKind::Stun,
+        Some(b) if *b >= 20 && *b <= 63  => PacketKind::Dtls,
+        Some(b) if *b >= 128             => PacketKind::Srtp,   // RTP+RTCP 모두
+        _                                => PacketKind::Unknown,
     }
 }
 
@@ -50,7 +58,8 @@ fn classify(buf: &[u8]) -> PacketKind {
 // ----------------------------------------------------------------------------
 
 pub async fn run_udp_relay(
-    hub:         Arc<MediaPeerHub>,
+    peer_hub:    Arc<MediaPeerHub>,
+    channel_hub: Arc<ChannelHub>,
     cert:        Arc<ServerCert>,
     session_map: Arc<DtlsSessionMap>,
 ) {
@@ -69,29 +78,37 @@ pub async fn run_udp_relay(
         };
 
         let packet = buf[..len].to_vec();
-        trace!("[media] {} bytes from {}", len, src_addr);
+        let kind = classify(&packet);
+        trace!("[media] {} bytes from {} kind={:?} byte0=0x{:02x}", len, src_addr, kind, packet[0]);
 
         if packet.is_empty() { continue; }
 
-        match classify(&packet) {
+        match kind {
             PacketKind::Stun => {
-                handle_stun(&socket, &packet, src_addr, &hub).await;
+                handle_stun(
+                    Arc::clone(&socket),
+                    &packet,
+                    src_addr,
+                    &peer_hub,
+                    Arc::clone(&cert),
+                    Arc::clone(&session_map),
+                ).await;
             }
             PacketKind::Dtls => {
                 handle_dtls(
                     Arc::clone(&socket),
                     packet,
                     src_addr,
-                    &hub,
+                    &peer_hub,
                     Arc::clone(&cert),
                     Arc::clone(&session_map),
                 ).await;
             }
             PacketKind::Srtp => {
-                handle_srtp(&socket, &packet, src_addr, &hub).await;
+                handle_srtp(&socket, &packet, src_addr, &peer_hub, &channel_hub).await;
             }
             PacketKind::Unknown => {
-                debug!("[media] unknown packet type from {}", src_addr);
+                trace!("[media] unknown packet type from {} byte0=0x{:02x}", src_addr, packet[0]);
             }
         }
     }
@@ -106,10 +123,12 @@ pub async fn run_udp_relay(
 // ----------------------------------------------------------------------------
 
 async fn handle_stun(
-    socket:   &UdpSocket,
-    packet:   &[u8],
-    src_addr: std::net::SocketAddr,
-    hub:      &MediaPeerHub,
+    socket:      Arc<UdpSocket>,
+    packet:      &[u8],
+    src_addr:    std::net::SocketAddr,
+    hub:         &MediaPeerHub,
+    cert:        Arc<ServerCert>,
+    session_map: Arc<DtlsSessionMap>,
 ) {
     trace!("[stun] Binding Request from {}", src_addr);
 
@@ -124,12 +143,29 @@ async fn handle_stun(
     };
 
     // MESSAGE-INTEGRITY + FINGERPRINT 포함 Binding Response 전송
-    // ice_pwd: 서버가 SDP answer에 넣어준 pwd → HMAC-SHA1 서명 키
     if let Some(resp) = make_binding_response(packet, src_addr, &ep.ice_pwd) {
         if let Err(e) = socket.send_to(&resp, src_addr).await {
             warn!("[stun] response failed: {}", e);
         } else {
             trace!("[stun] Binding Response sent to {}", src_addr);
+        }
+    }
+
+    // latch 완료 후 pending DTLS 패킷이 있으면 핸드셰이크 시작
+    // (DTLS가 STUN보다 먼저 도착한 경우 대비)
+    let pending = session_map.drain_pending(&src_addr).await;
+    if !pending.is_empty() {
+        info!("[stun] draining {} pending DTLS packet(s) for user={} addr={}", pending.len(), ep.user_id, src_addr);
+        // 이미 핸드셰이크가 진행 중이 아닌 경우에만 시작
+        if !session_map.inject(&src_addr, pending[0].clone()).await {
+            start_dtls_handshake(
+                Arc::clone(&socket),
+                src_addr,
+                ep,
+                cert,
+                session_map,
+                pending,
+            ).await;
         }
     }
 }
@@ -153,7 +189,7 @@ async fn handle_dtls(
     cert:        Arc<ServerCert>,
     session_map: Arc<DtlsSessionMap>,
 ) {
-    // 1. 기존 핸드셰이크 세션에 패킷 주입 (핫패스)
+    // 1. 기존 핸드셰이크 세션에 패킷 주입 (했패스)
     if session_map.inject(&src_addr, packet.clone()).await {
         trace!("[dtls] injected {} bytes to existing session addr={}", packet.len(), src_addr);
         return;
@@ -163,28 +199,24 @@ async fn handle_dtls(
     let endpoint = match hub.get_by_addr(&src_addr) {
         Some(ep) => ep,
         None     => {
-            debug!("[dtls] no endpoint for addr={}, waiting for STUN latch", src_addr);
+            // STUN latch 전에 DTLS가 먼저 도착한 경우 — pending 큐에 저장
+            // latch 완료 시 handle_stun()에서 drain하여 핸드셰이크 시작
+            debug!("[dtls] no endpoint yet for addr={}, queuing as pending", src_addr);
+            session_map.enqueue_pending(src_addr, packet).await;
             return;
         }
     };
 
     info!("[dtls] new session for user={} addr={}", endpoint.user_id, src_addr);
 
-    // 3. UdpConnAdapter 생성 + 핸드셰이크 시작 (백그라운드)
-    //    첫 번째 패킷(ClientHello)은 핸드셰이크 spawn 직후 주입
     start_dtls_handshake(
         socket,
         src_addr,
         endpoint,
         cert,
         Arc::clone(&session_map),
+        vec![packet],  // 첫 번째 패킷 직접 주입
     ).await;
-
-    // 4. 핸드셰이크 시작 후 첫 번째 패킷을 세션에 주입
-    //    (start_dtls_handshake 내부에서 session_map에 등록 완료됨)
-    if !session_map.inject(&src_addr, packet).await {
-        warn!("[dtls] failed to inject initial packet addr={}", src_addr);
-    }
 }
 
 // ----------------------------------------------------------------------------
@@ -194,10 +226,11 @@ async fn handle_dtls(
 // ----------------------------------------------------------------------------
 
 async fn handle_srtp(
-    socket:   &UdpSocket,
-    packet:   &[u8],
-    src_addr: std::net::SocketAddr,
-    hub:      &MediaPeerHub,
+    socket:      &UdpSocket,
+    packet:      &[u8],
+    src_addr:    std::net::SocketAddr,
+    hub:         &MediaPeerHub,
+    channel_hub: &ChannelHub,
 ) {
     let ep = match hub.get_by_addr(&src_addr) {
         Some(e) => e,
@@ -206,16 +239,47 @@ async fn handle_srtp(
 
     ep.touch();
 
-    // inbound 복호화
-    let plaintext = {
+    // RTCP 판별: byte1 >= 0xC8(200) 이면 SRTCP
+    // Chrome은 PTT 시작 시 첫 패킷으로 RTCP SR(byte1=0xC8)을 보냄
+    // decrypt_rtp 로 처리하면 auth tag 실패 → decrypt_rtcp 로 분기
+    let is_rtcp = packet.get(1).map(|&b| b >= 0xC8).unwrap_or(false);
+
+    // MutexGuard를 블록으로 감싸서 await 진입 전에 반드시 drop
+    // (std::sync::MutexGuard는 Send가 아니므로 tokio::spawn 안에서 await 넘지불가)
+    enum DecryptResult { Rtcp, Rtp(Vec<u8>), Err }
+
+    let result = {
         let mut ctx = ep.inbound_srtp.lock().unwrap();
-        match ctx.decrypt(packet) {
-            Ok(p)  => p,
-            Err(e) => { warn!("[srtp] decrypt failed user={}: {}", ep.user_id, e); return; }
+        if !ctx.is_ready() {
+            trace!("[srtp] key not yet installed, dropping packet user={}", ep.user_id);
+            return;
         }
+        if is_rtcp {
+            match ctx.decrypt_rtcp(packet) {
+                Ok(_)  => trace!("[srtcp] ok user={}", ep.user_id),
+                Err(e) => trace!("[srtcp] decrypt failed user={}: {}", ep.user_id, e),
+            }
+            DecryptResult::Rtcp
+        } else {
+            match ctx.decrypt(packet) {
+                Ok(p)  => DecryptResult::Rtp(p),
+                Err(e) => {
+                    let pt = packet.get(1).map(|b| b & 0x7F).unwrap_or(0);
+                    warn!("[srtp] decrypt failed user={} byte0=0x{:02x} pt={} len={}: {}",
+                        ep.user_id, packet[0], pt, packet.len(), e);
+                    DecryptResult::Err
+                }
+            }
+        }
+        // MutexGuard drop here (블록 종료)
     };
 
-    relay_to_channel(socket, &plaintext, &ep.ufrag, &ep.channel_id, hub).await;
+    let plaintext = match result {
+        DecryptResult::Rtcp | DecryptResult::Err => return,
+        DecryptResult::Rtp(p) => p,
+    };
+
+    relay_to_channel(socket, &plaintext, &ep.user_id, &ep.ufrag, &ep.channel_id, hub, channel_hub).await;
 }
 
 // ----------------------------------------------------------------------------
@@ -225,14 +289,29 @@ async fn handle_srtp(
 async fn relay_to_channel(
     socket:       &UdpSocket,
     plaintext:    &[u8],
+    sender_user:  &str,
     sender_ufrag: &str,
     channel_id:   &str,
     hub:          &MediaPeerHub,
+    channel_hub:  &ChannelHub,
 ) {
+    // Floor Control 체크: sender가 현재 floor holder여야만 릴레이
+    // Idle 상태이거나 다른 사람이 holder이면 패킷 드롭
+    if let Some(ch) = channel_hub.get(channel_id) {
+        let floor = ch.floor.lock().unwrap();
+        let is_granted = floor.state == FloorControlState::Taken
+            && floor.floor_taken_by.as_deref() == Some(sender_user);
+        drop(floor);
+        if !is_granted {
+            trace!("[relay] floor not granted for user={}, dropping", sender_user);
+            return;
+        }
+    }
+
     let targets = hub.get_channel_endpoints(channel_id);
 
     for target in targets {
-        if target.ufrag == sender_ufrag { continue; }
+        if target.ufrag == sender_ufrag { continue; } // 자기 자신 제외
 
         let addr = match target.get_address() {
             Some(a) => a,
@@ -280,6 +359,7 @@ fn parse_stun_username(packet: &[u8]) -> Option<String> {
             // USERNAME = "server_ufrag:client_ufrag"
             // 서버 ufrag(nth(0))로 MediaPeerHub 조회 — 서버가 생성한 16자 ufrag
             let server_ufrag = username.split(':').next().unwrap_or(username);
+            trace!("[stun] USERNAME={} → server_ufrag={}", username, server_ufrag);
             return Some(server_ufrag.to_string());
         }
 

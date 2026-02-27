@@ -43,6 +43,7 @@ pub async fn run_server() {
     // UDP 미디어 릴레이 태스크
     tokio::spawn(media::run_udp_relay(
         Arc::clone(&media_peer_hub),
+        Arc::clone(&channel_hub),
         Arc::clone(&server_cert),
         Arc::clone(&dtls_session_map),
     ));

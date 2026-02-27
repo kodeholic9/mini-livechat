@@ -202,6 +202,47 @@ All notable changes to this project will be documented in this file.
 - DTLS: `connected` ✅  
 - SRTP 패킷 수신: Opus 73bytes @ 20ms 간격 ✅
 
+## [0.14.0] - 2026-02-28
+
+### SRTP/SRTCP 분리 복호화 + Floor Control 시그널링 버그 수정
+
+#### media/srtp.rs
+- `SrtpContext::decrypt_rtcp()` 추가
+  - 내부 `Context::decrypt_rtcp()` 호출, 반환 `Vec<u8>`
+  - 키 미설치 시 `KeyNotInstalled` 에러
+
+#### media/net.rs
+- **RTCP/RTP 분기 처리** (`handle_srtp`)
+  - `byte1 >= 0xC8(200)` 이면 SRTCP — `decrypt_rtcp()` 경로로 분기
+  - 이전: 모든 패킷을 `decrypt_rtp()`로 처리 → Chrome RTCP SR(byte1=0xC8) 첫 패킷 auth tag 실패
+  - SRTCP는 통계용(SR/RR)이므로 복호화 후 drop (릴레이 없음)
+- **MutexGuard Send 문제 수정** (`handle_srtp`)
+  - `enum DecryptResult { Rtcp, Rtp(Vec<u8>), Err }` 도입
+  - `ctx` MutexGuard를 블록 내에 완전히 격리 → 블록 종료 시 drop
+  - `relay_to_channel().await` 진입 시점에 Guard 부재 보장
+- **Floor Control 릴레이 게이트** (`relay_to_channel`)
+  - `ChannelHub`를 파라미터로 추가
+  - `FloorControlState::Taken && floor_taken_by == sender_user` 일 때만 릴레이
+  - Floor Idle 또는 다른 사람이 holder면 trace 로그 후 drop
+- `run_udp_relay()` / `handle_srtp()` 시그니처에 `channel_hub: Arc<ChannelHub>` 추가
+
+#### protocol/floor.rs
+- **FLOOR_TAKEN 시그널링 버그 수정**
+  - Granted 케이스: `FLOOR_TAKEN`을 `broadcast_to(..., Some(user_id))` — 본인 제외
+  - 이전: `broadcast_to(..., None)` → granted 본인도 FLOOR_TAKEN 수신 (중복)
+  - Preempt 케이스 동일 수정
+- **`dispatch_packets()` 시그니처 확장**
+  - `Vec<(Option<String>, String)>` → `Vec<(Option<String>, Option<String>, String)>`
+  - 3번째 필드: `exclude: Option<String>` — 브로드캐스트 시 제외할 user_id
+- **`decide_next()` 반환 타입 일치**
+  - Queue → Grant 시 FLOOR_TAKEN을 `(None, Some(next_user_id), json)` — holder 제외 전송
+  - `PingAction::Revoke.packets` 타입도 3-튜플로 수정
+
+#### lib.rs
+- `media::run_udp_relay()` 호출에 `Arc::clone(&channel_hub)` 추가
+
+---
+
 ## [TODO] (다음 세션)
 
 ### 즉시 해야 할 것 — `cargo build` 통과 확인

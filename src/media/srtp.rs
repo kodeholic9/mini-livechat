@@ -57,6 +57,16 @@ impl SrtpContext {
 
     /// 수신 SRTP 패킷 복호화 → plaintext RTP bytes
     /// 키 미설치 시: KeyNotInstalled 에러 반환 (패스스루 없음)
+    pub fn decrypt_rtcp(&mut self, packet: &[u8]) -> Result<Vec<u8>, SrtpError> {
+        match &mut self.inner {
+            None => Err(SrtpError::KeyNotInstalled),
+            Some(ctx) => ctx
+                .decrypt_rtcp(packet)
+                .map(|b: bytes::Bytes| b.to_vec())
+                .map_err(|e: webrtc_srtp::Error| SrtpError::DecryptFailed(e.to_string())),
+        }
+    }
+
     pub fn decrypt(&mut self, packet: &[u8]) -> Result<Vec<u8>, SrtpError> {
         match &mut self.inner {
             None => Err(SrtpError::KeyNotInstalled),

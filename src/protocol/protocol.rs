@@ -230,7 +230,13 @@ async fn handle_channel_join(
     // STUN USERNAME = "server_ufrag:client_ufrag" 구조이므로 서버 ufrag로 조회해야 함
     let (sdp_answer, ep_ufrag, ep_pwd) = match payload.sdp_offer.as_deref() {
         Some(offer) => {
+            // offer의 a=setup 값 확인용 로그 (DTLS 역할 디버그)
+            let offer_setup = offer.lines()
+                .find(|l| l.starts_with("a=setup:"))
+                .unwrap_or("a=setup:(없음)");
+            trace!("[sdp] offer a=setup: {}", offer_setup);
             let (sdp, server_ufrag, server_pwd) = build_sdp_answer(offer, &state.server_cert.fingerprint);
+            trace!("[sdp] answer built ufrag={} (offer_setup={})", server_ufrag, offer_setup);
             (Some(sdp), server_ufrag, server_pwd)
         }
         None => (None, payload.ufrag.clone(), String::new()),
@@ -608,7 +614,9 @@ fn build_sdp_answer(offer: &str, fingerprint: &str) -> (String, String, String) 
     // 미디어 속성
     sdp.push_str("a=rtcp-mux\r\n");
     sdp.push_str("a=rtcp-rsize\r\n");
-    sdp.push_str("a=recvonly\r\n");      // 서버는 수신 전용
+    // sendrecv 사용: recvonly로 하면 일부 브라우저/버전에서 DTLS를 시작하지 않는 문제 발생
+    // 실제 미디어 방향은 애플리케이션 레이어(Floor Control)에서 제어
+    sdp.push_str("a=sendrecv\r\n");
 
     // offer에서 미러링한 코덱 라인들
     for line in &codec_lines {
