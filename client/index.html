@@ -600,6 +600,27 @@
 
         <div class="ptt-section">
           <div class="section-label">PTT (Push-To-Talk)</div>
+
+          <!-- 비디오 토글 -->
+          <label style="display:flex; align-items:center; gap:8px; margin-bottom:10px; cursor:pointer;">
+            <div style="position:relative; width:36px; height:20px; flex-shrink:0;">
+              <input type="checkbox" id="video-toggle" style="opacity:0; width:0; height:0; position:absolute;">
+              <div id="video-toggle-track" style="
+                position:absolute; inset:0;
+                background:var(--muted); border-radius:10px;
+                transition:background 0.2s;
+              "></div>
+              <div id="video-toggle-thumb" style="
+                position:absolute; top:3px; left:3px;
+                width:14px; height:14px;
+                background:#fff; border-radius:50%;
+                transition:transform 0.2s;
+              "></div>
+            </div>
+            <span style="font-family:var(--mono); font-size:10px; color:var(--text-dim); letter-spacing:1px;">VIDEO</span>
+            <span id="video-toggle-label" style="font-family:var(--mono); font-size:9px; color:var(--text-dim); margin-left:auto;">OFF</span>
+          </label>
+
           <button class="btn btn-warn" id="ptt-btn" disabled>
             ● PUSH TO TALK
           </button>
@@ -616,6 +637,23 @@
             id="media-state"
           >
             미디어 비활성
+          </div>
+        </div>
+
+        <!-- 비디오 프리뷰 영역 -->
+        <div id="video-section" style="display:none; padding:10px 16px; border-bottom:1px solid var(--border);">
+          <div class="section-label" style="margin-bottom:6px;">VIDEO</div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px;">
+            <div>
+              <div style="font-family:var(--mono); font-size:8px; color:var(--text-dim); margin-bottom:3px;">LOCAL</div>
+              <video id="local-video" autoplay muted playsinline
+                style="width:100%; aspect-ratio:4/3; background:#000; object-fit:cover;"></video>
+            </div>
+            <div>
+              <div style="font-family:var(--mono); font-size:8px; color:var(--text-dim); margin-bottom:3px;">REMOTE</div>
+              <video id="remote-video" autoplay playsinline
+                style="width:100%; aspect-ratio:4/3; background:#111; object-fit:cover;"></video>
+            </div>
           </div>
         </div>
 

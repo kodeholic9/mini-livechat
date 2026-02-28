@@ -6,13 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ## [TODO] (다음 세션)
 
-### 비디오 지원
+### 다음 과제
 
-- [ ] `build_sdp_answer()` — `m=video` 섹션 미러링 추가 (audio와 동일 패턴)
-- [ ] `client/app.js` — `getUserMedia({ video: true })`, `addTrack(videoTrack)` 추가
-- [ ] `client/app.js` — `setMediaTransmission()` 으로 확장 (video sender 동시 제어)
-- [ ] `client/app.js` — `ontrack` 에서 수신 video → `<video>` 엘리먼트 연결
-- [ ] `client/index.html` — `<video>` 태그 추가 (로컬 프리뷰 + 리모트 수신용)
+- [ ] 멀티 원격 비디오 — 현재 remote-video 엘리먼트 1개, 다수 참여자 레이아웃 확장
+- [ ] E2E 비디오 테스트 (카메라 환경 필요)
 
 ### E2E 시나리오 테스트 (브라우저 2탭)
 
@@ -46,6 +43,45 @@ All notable changes to this project will be documented in this file.
 - [ ] 복호화된 RTP → 채널 내 다른 피어 relay
 - [ ] Floor Taken 상태일 때만 릴레이 (holder → others)
 - [ ] Floor Idle 상태에서 수신된 RTP는 drop 또는 버퍼
+
+---
+
+## [0.19.0] - 2026-02-28
+
+### 비디오 지원 추가 (BUNDLE 확장)
+
+#### src/protocol/protocol.rs
+
+- `build_sdp_answer()` 전면 리팩토링
+  - 단일 audio 하드코딩 → `MediaSection` 구조체 기반 범용 파서로 교체
+  - offer의 `m=` 섹션을 순서대로 수집한 뒤 audio/video 모두 동일 패턴으로 미러링
+  - BUNDLE `a=group` 구성 시 mid 목록을 offer 순서대로 조립
+  - 서버 코드 변경 없이 offer에 `m=video` 있으면 자동 수락
+
+#### client/index.html
+
+- PTT 섹션에 비디오 토글 (ON/OFF 슬라이더) 추가
+  - JOIN 전에 설정, 커넥티던 후 변경 시 다음 JOIN에서 적용 안내
+- 좌측 쿼름 하단에 VIDEO 영역 추가 (toggle ON 시에만 표시)
+  - LOCAL: 자신 카메라 프리뷰 (`<video autoplay muted>`)
+  - REMOTE: Floor holder 비디오 수신 (`<video autoplay>`)
+
+#### client/app.js
+
+- `state.videoEnabled`, `state.videoSender` 추가
+- `setAudioTransmission()` → `setMediaTransmission()` 로 확장
+  - 오디오 + 비디오 sender 동시 `replaceTrack()` 제어
+  - `setAudioTransmission()`은 하위 호환 alias로 유지
+- `initVideoToggle()` 함수 추가 — 체크박스 변경 시 슬라이더 UI + state 동기화
+- `setupWebRTC()` 확장
+  - `getUserMedia`에 `video: state.videoEnabled ? { width:640, height:480, fps:15 } : false` 조건 적용
+  - 비디오 트랙이 있으면 `pc.addTrack()` 후 초기 `replaceTrack(null)` 차단
+  - 로컈 비디오를 `local-video` 엘리먼트에 연결
+  - `createOffer`에 `offerToReceiveVideo: state.videoEnabled` 전달
+- `ontrack()` 확장 — `kind === 'video'` 시 `remote-video` 엘리먼트에 연결
+- `onFloorGranted()` — `setMediaTransmission(true)` 로 오디오+비디오 동시 상향 시작
+- `onFloorIdle()` / `onFloorRevoke()` — `remote-video.srcObject = null` 추가
+- 언마운트 시 `local/remote-video srcObject` 클리어
 
 ---
 
