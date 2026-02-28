@@ -59,7 +59,7 @@ UDP 미디어 릴레이 (net.rs, ICE Lite + DTLS-SRTP)
 
 ---
 
-## 빌드 및 실행
+## 빌드 및 실행 (개발 환경)
 
 ```bash
 # 빌드 (디버그)
@@ -98,6 +98,70 @@ RUST_LOG=trace cargo run --bin lcserver -- --port 8080 --udp-port 10000
 |---|---|---|
 | `LIVECHAT_SECRET` | `changeme-secret` | IDENTIFY 토큰 검증용 Secret Key. 운영 환경에서는 반드시 교체할 것 |
 | `RUST_LOG` | — | 로그 레벨 (`error` / `warn` / `info` / `debug` / `trace`) |
+
+---
+
+## 배포 및 운영 (서버 환경)
+
+서버 환경(예: Raspberry Pi, Linux 서버) 배포는 `deploy-livechat.sh` 스크립트로 관리합니다.
+Git clone → cargo build --release → nohup 기동 방식이며, 바이너리 백업 및 로그 관리를 포함합니다.
+
+### 초기 설치 (1회)
+
+```bash
+mkdir -p ~/livechat && cd ~/livechat
+
+# 배포 스크립트 다운로드
+curl -O https://raw.githubusercontent.com/kodeholic9/mini-livechat/main/deploy-livechat.sh
+chmod +x deploy-livechat.sh
+
+# Rust 툴체인 설치 + 빌드 의존성 + 초기 빌드
+./deploy-livechat.sh setup
+
+# 환경변수 설정 (LIVECHAT_SECRET 필수 변경)
+vi .env
+```
+
+`setup` 완료 후 디렉토리 구조:
+
+```
+~/livechat/
+├── deploy-livechat.sh       ← 배포/운영 스크립트
+├── src/                     ← git clone + cargo build 작업 디렉토리
+├── bin/
+│   ├── lcserver             ← release 바이너리
+│   ├── lcadmin
+│   └── lctrace
+├── backup/                  ← 이전 바이너리 백업 (최근 5개 유지)
+├── logs/                    ← stdout/stderr 로그 (날짜별)
+└── .env                     ← 환경변수 (LIVECHAT_SECRET, RUST_LOG 등)
+```
+
+### 일상 운영
+
+```bash
+# 서버 시작/종료/재시작
+./deploy-livechat.sh start
+./deploy-livechat.sh stop
+./deploy-livechat.sh restart
+
+# 상태 확인 (PID, CPU, 메모리, 바이너리 정보)
+./deploy-livechat.sh status
+
+# 로그 실시간 확인
+./deploy-livechat.sh log
+
+# 새 버전 배포 (백업 → git pull → build --release → restart)
+./deploy-livechat.sh patch
+```
+
+### .env 예시
+
+```bash
+RUST_LOG=info
+LIVECHAT_SECRET=my_production_secret_key
+# ADVERTISE_IP=192.168.1.100
+```
 
 ---
 
@@ -412,16 +476,31 @@ curl -N http://127.0.0.1:8080/trace/CH_0001
 
 ## 테스트
 
+단위 테스트 71개가 각 모듈에 인라인(`#[cfg(test)]`)으로 작성되어 있습니다.
+
 ```bash
-# 전체 테스트
+# 전체 테스트 (71개)
 cargo test
 
-# 유닛 테스트만
-cargo test --test core_test
-
-# 통합 테스트만
-cargo test --test integration_test
+# 특정 모듈만
+cargo test core::floor
+cargo test protocol::sdp
+cargo test error
 ```
+
+### 테스트 커버리지
+
+| 모듈 | 테스트 수 | 검증 내용 |
+|---|---|---|
+| `core/user.rs` | 7 | register/unregister/count/duplicate/all_users/touch/zombie |
+| `core/channel.rs` | 8 | create/duplicate/remove/add_member/capacity/dup_member/remove_member/floor_count |
+| `core/floor.rs` | 14 | 상태전이/enqueue우선순위/중복/remove/position/preempt 3종/ping/timeout 3종 |
+| `core/media_peer.rs` | 9 | insert/latch/remove/channel_filter/count/track_dedup/address/zombie |
+| `error.rs` | 6 | 에러코드 범위 매핑 + display + 범위 검증 |
+| `protocol/sdp.rs` | 14 | ice_string 3 + SDP answer 8 + BUNDLE 2 + detect_ip 1 |
+| `trace.rs` | 4 | no_subscriber/subscribe/multi_subscriber/json직렬화 |
+| `media/srtp.rs` | 5 | new/key_install/decrypt_before/encrypt_before/roundtrip |
+| `media/net.rs` | 4 | classify_stun/dtls/srtp/unknown |
 
 ---
 
@@ -445,6 +524,9 @@ cargo test --test integration_test
 | 운영 관리 CLI (lcadmin) | ✅ 완료 |
 | 실시간 시그널링 관찰 CLI (lctrace) | ✅ 완료 |
 | STUN keepalive 핫패스 최적화 | ✅ 완료 |
+| 비디오 지원 (BUNDLE 확장) | ✅ 완료 |
+| 모듈 분리 리팩터링 + 단위 테스트 71개 | ✅ 완료 |
+| 배포 스크립트 (deploy-livechat.sh) | ✅ 완료 |
 | net.rs SO_REUSEPORT + recvmmsg | 🔲 부하 테스트 후 적용 예정 |
 
 ---
