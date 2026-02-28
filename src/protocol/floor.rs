@@ -21,6 +21,7 @@ use tracing::{trace, warn};
 use crate::config;
 use crate::core::{ChannelHub, FloorControl, FloorControlState, FloorIndicator, UserHub};
 use crate::error::LiveError;
+use crate::trace::{TraceDir, TraceEvent, TraceHub};
 use crate::protocol::message::{
     FloorGrantedPayload, FloorIdlePayload, FloorIndicatorDto,
     FloorPingPayload, FloorPongPayload,
@@ -144,6 +145,7 @@ pub async fn handle_floor_request(
     user_id:     &str,
     user_hub:    &Arc<UserHub>,
     channel_hub: &Arc<ChannelHub>,
+    trace_hub:   &Arc<TraceHub>,
     packet:      GatewayPacket,
 ) -> Result<(), LiveError> {
     let payload    = parse_payload::<FloorRequestPayload>(packet.d)?;
@@ -232,21 +234,34 @@ pub async fn handle_floor_request(
     match action {
         Action::Granted { granted_json, taken_json } => {
             send(tx, granted_json).await?;
-            // FLOOR_TAKEN은 본인 제외 나머지 멤버에게만 — 본인은 FLOOR_GRANTED로 충분
             user_hub.broadcast_to(&members, &taken_json, Some(user_id)).await;
             trace!("Floor Granted (Idle→Taken): channel={} user={}", channel_id, user_id);
+            trace_hub.publish(TraceEvent::new(
+                TraceDir::Out, Some(&channel_id), Some(user_id),
+                server::FLOOR_GRANTED, "FLOOR_GRANTED",
+                format!("user={} priority={}", user_id, priority),
+            ));
         }
         Action::Preempt { revoke_json, granted_json, taken_json, old_holder } => {
             if let Some(holder_user) = user_hub.get(&old_holder) {
                 let _ = holder_user.tx.send(revoke_json).await;
             }
             send(tx, granted_json).await?;
-            // FLOOR_TAKEN은 본인 제외
             user_hub.broadcast_to(&members, &taken_json, Some(user_id)).await;
             warn!("Floor Preempted: channel={} old={} new={}", channel_id, old_holder, user_id);
+            trace_hub.publish(TraceEvent::new(
+                TraceDir::Out, Some(&channel_id), Some(user_id),
+                server::FLOOR_GRANTED, "FLOOR_GRANTED(PREEMPT)",
+                format!("new={} old={} priority={}", user_id, old_holder, priority),
+            ));
         }
         Action::Queued { pos_json } => {
             send(tx, pos_json).await?;
+            trace_hub.publish(TraceEvent::new(
+                TraceDir::Out, Some(&channel_id), Some(user_id),
+                server::FLOOR_QUEUE_POS_INFO, "FLOOR_QUEUED",
+                format!("user={} priority={}", user_id, priority),
+            ));
         }
     }
 
@@ -259,6 +274,7 @@ pub async fn handle_floor_release(
     user_id:     &str,
     user_hub:    &Arc<UserHub>,
     channel_hub: &Arc<ChannelHub>,
+    trace_hub:   &Arc<TraceHub>,
     packet:      GatewayPacket,
 ) -> Result<(), LiveError> {
     let payload    = parse_payload::<FloorReleasePayload>(packet.d)?;
@@ -279,6 +295,12 @@ pub async fn handle_floor_release(
         decide_next(channel_id, &mut floor, &members)
         // MutexGuard drop here
     };
+
+    trace_hub.publish(TraceEvent::new(
+        TraceDir::Out, Some(channel_id), Some(user_id),
+        server::FLOOR_IDLE, "FLOOR_RELEASE→IDLE",
+        format!("user={}", user_id),
+    ));
 
     dispatch_packets(packets, &members, user_hub).await;
     Ok(())
@@ -380,6 +402,75 @@ pub async fn check_floor_timeouts(
             if let Some(user) = user_hub.get(&holder) {
                 let _ = user.tx.send(revoke_json).await;
             }
+            dispatch_packets(packets, &members, user_hub).await;
+        }
+    }
+}
+
+/// check_floor_timeouts의 TraceHub 포함 버전
+pub async fn check_floor_timeouts_traced(
+    user_hub:    &Arc<UserHub>,
+    channel_hub: &Arc<ChannelHub>,
+    trace_hub:   &Arc<TraceHub>,
+) {
+    let channel_ids: Vec<String> = {
+        channel_hub.channels.read().unwrap().keys().cloned().collect()
+    };
+
+    for channel_id in channel_ids {
+        let channel = match channel_hub.get(&channel_id) {
+            Some(ch) => ch,
+            None     => continue,
+        };
+
+        enum Action {
+            Skip,
+            Revoke {
+                cause:       String,
+                holder:      String,
+                revoke_json: String,
+                packets:     Vec<(Option<String>, Option<String>, String)>,
+                members:     std::collections::HashSet<String>,
+            },
+        }
+
+        let action = {
+            let mut floor = channel.floor.lock().unwrap();
+            if floor.state != FloorControlState::Taken {
+                Action::Skip
+            } else if floor.is_max_taken_exceeded() {
+                let holder      = floor.floor_taken_by.clone().unwrap_or_default();
+                let revoke_json = make_packet(server::FLOOR_REVOKE, FloorRevokePayload {
+                    channel_id: channel_id.clone(),
+                    cause:      "max_duration".to_string(),
+                });
+                let members = channel.get_members();
+                let packets = decide_next(&channel_id, &mut floor, &members);
+                Action::Revoke { cause: "max_duration".to_string(), holder, revoke_json, packets, members }
+            } else if floor.is_ping_timeout() {
+                let holder      = floor.floor_taken_by.clone().unwrap_or_default();
+                let revoke_json = make_packet(server::FLOOR_REVOKE, FloorRevokePayload {
+                    channel_id: channel_id.clone(),
+                    cause:      "ping_timeout".to_string(),
+                });
+                let members = channel.get_members();
+                let packets = decide_next(&channel_id, &mut floor, &members);
+                Action::Revoke { cause: "ping_timeout".to_string(), holder, revoke_json, packets, members }
+            } else {
+                Action::Skip
+            }
+        };
+
+        if let Action::Revoke { cause, holder, revoke_json, packets, members } = action {
+            warn!("Floor Revoke ({}): channel={} user={}", cause, channel_id, holder);
+            if let Some(user) = user_hub.get(&holder) {
+                let _ = user.tx.send(revoke_json).await;
+            }
+            trace_hub.publish(TraceEvent::new(
+                TraceDir::Sys, Some(&channel_id), Some(&holder),
+                server::FLOOR_REVOKE, "FLOOR_REVOKE",
+                format!("cause={} user={}", cause, holder),
+            ));
             dispatch_packets(packets, &members, user_hub).await;
         }
     }

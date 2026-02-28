@@ -41,6 +41,7 @@ colored     = "2"
 hmac        = "0.12"
 sha-1       = "0.10"
 crc32fast   = "1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [[bin]]
 name = "lcserver"
@@ -49,6 +50,10 @@ path = "src/main.rs"
 [[bin]]
 name = "lcadmin"
 path = "src/bin/admin.rs"
+
+[[bin]]
+name = "lctrace"
+path = "src/bin/trace.rs"
 
 [dev-dependencies]
 # 통합 테스트용 WS 클라이언트

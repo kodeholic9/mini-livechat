@@ -46,6 +46,70 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.17.0] - 2026-02-28
+
+### lctrace 실시간 시그널링 관샼 CLI
+
+#### Cargo.toml
+
+- `tokio-stream = "0.1"` (sync feature) 추가 — `BroadcastStream` SSE 스트림용
+- `[[bin]] name = "lctrace"` 선언 추가
+
+#### src/trace.rs (신규)
+
+- `TraceHub` — `tokio::sync::broadcast` 기반 이벤트 버스
+  - `publish()` — 구독자없으면 조용히 비워나감 (O(1), 서버 성능 무영향)
+  - `subscribe()` — SSE 연결마다 호출, `BroadcastReceiver` 반환
+- `TraceEvent` — 시그널링 이벤트 구조체 (`ts`, `dir`, `channel_id`, `user_id`, `op`, `op_name`, `summary`)
+- `TraceDir` — `In` (C→S) / `Out` (S→C) / `Sys` (서버 내부)
+
+#### src/lib.rs
+
+- `pub mod trace` 선언 추가
+- `TraceHub::new()` 생성, `AppState` 및 `HttpState`에 주입
+- `run_zombie_reaper` 시그니처에 `trace_hub` 추가
+- `check_floor_timeouts` → `check_floor_timeouts_traced` 대체
+- `/trace` / `/trace/{channel_id}` SSE 라우트 마운트
+
+#### src/protocol/protocol.rs
+
+- `AppState`에 `trace_hub: Arc<TraceHub>` 요소 추가
+- `publish_in_event()` 유틸 함수 추가 — C→S 수신 패킷을 한 줄로 publish (HEARTBEAT 제외)
+- `op_meta_in()` — opcode → (이름, 요약) 매핑
+- CHANNEL_JOIN 핸들러에 `TraceDir::Sys` 입장 이벤트 publish 추가
+- FLOOR_REQUEST / FLOOR_RELEASE 호출에 `trace_hub` 인수 추가
+
+#### src/protocol/floor.rs
+
+- `handle_floor_request` / `handle_floor_release` 시그니처에 `trace_hub` 추가
+- `handle_floor_request` — Granted / Preempt / Queued 세 가지 경로에 이벤트 publish
+- `handle_floor_release` — RELEASE→IDLE 이벤트 publish
+- `check_floor_timeouts_traced()` 신규 — REVOKE 시간초과 이벤트 publish 포함 버전
+
+#### src/http.rs
+
+- `HttpState`에 `trace_hub: Arc<TraceHub>` 요소 추가
+- `HttpState::new()` 시그니처에 `trace_hub` 추가
+- `trace_stream()` 핸들러 추가 — SSE `text/event-stream`
+  - `BroadcastStream` 기반 스트림, 15초 keep-alive
+  - channel_id 라우트 파라미터 유무에 따라 전체 or 특정 채널 필터
+  - Lagged 에러(bfq속자 느림) 는 `None`으로 skip — 서버 성능 무영향
+
+#### src/bin/trace.rs (신규)
+
+- `lctrace` CLI 바이너리 (reqwest blocking + SSE chunked read)
+- clap 옵션: `--host`, `--port`, `--filter`, `[CHANNEL_ID]`
+- 코드 이벤트 콜러 옵션:
+  - `FLOOR_GRANTED` → 초록 bold
+  - `FLOOR_REVOKE` / `FLOOR_DENY` → 빨간색 bold
+  - `FLOOR_*` → 노란색
+  - `*JOIN` / `*LEAVE` → 청록색
+  - `IDENTIFY` → 자주색
+- 방향 콜러: `↓ C→S` (blue) / `↑ S→C` (green) / `· SYS` (yellow)
+- 서버 측 필터 + 클라이언트 측 `--filter` 복잡 필터 조합 가능
+
+---
+
 ## [0.16.0] - 2026-02-28
 
 ### 운영 관리 CLI (lcadmin) + PTT 토글 + 채널 개편

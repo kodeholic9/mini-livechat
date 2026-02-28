@@ -21,15 +21,19 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Sse},
     Json,
 };
+use axum::response::sse::Event;
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as _;
 
 use crate::core::{ChannelHub, FloorControlState, MediaPeerHub, UserHub};
+use crate::trace::{TraceHub};
 use crate::utils::current_timestamp;
 
 // ----------------------------------------------------------------------------
@@ -41,6 +45,7 @@ pub struct HttpState {
     pub user_hub:       Arc<UserHub>,
     pub channel_hub:    Arc<ChannelHub>,
     pub media_peer_hub: Arc<MediaPeerHub>,
+    pub trace_hub:      Arc<TraceHub>,
     /// 서버 프로세스 시작 시각 (Unix millis) — uptime 계산용
     pub start_time_ms:  u64,
 }
@@ -50,12 +55,13 @@ impl HttpState {
         user_hub:       Arc<UserHub>,
         channel_hub:    Arc<ChannelHub>,
         media_peer_hub: Arc<MediaPeerHub>,
+        trace_hub:      Arc<TraceHub>,
     ) -> Self {
         let start_time_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        Self { user_hub, channel_hub, media_peer_hub, start_time_ms }
+        Self { user_hub, channel_hub, media_peer_hub, trace_hub, start_time_ms }
     }
 }
 
@@ -527,4 +533,54 @@ fn floor_state_str(state: &FloorControlState) -> String {
         FloorControlState::Idle  => "idle".to_string(),
         FloorControlState::Taken => "taken".to_string(),
     }
+}
+
+// ----------------------------------------------------------------------------
+// [Trace SSE]
+//
+// GET /trace              — 전체 이벤트 스트림
+// GET /trace/{channel_id} — 특정 채널 필터 후 스트림
+//
+// 응답 포맷: text/event-stream
+// 이벤트 형식: data: {JSON}
+//
+// 브라우저는 EventSource, lctrace CLI는 reqwest chunk read
+// ----------------------------------------------------------------------------
+
+pub async fn trace_stream(
+    State(state): State<HttpState>,
+    channel_filter: Option<Path<String>>,
+) -> impl IntoResponse {
+    let rx   = state.trace_hub.subscribe();
+    let filter = channel_filter.map(|Path(id)| id);
+
+    // BroadcastStream: Lagged 에러는 None으로 스� — 구독자가 느린 경우 오래된 이벤트 자동 drop
+    let stream = BroadcastStream::new(rx)
+        .filter_map(move |result| {
+            let f = filter.clone();
+            match result {
+                Err(_lagged) => None, // 디코드 느린 구독자 — 조용히 skip
+                Ok(event) => {
+                    // 채널 필터: channel_id가 지정되면 해당 채널 이벤트만 통과
+                    let pass = match &f {
+                        None     => true,
+                        Some(ch) => event.channel_id.as_deref() == Some(ch.as_str()),
+                    };
+                    if pass {
+                        let json = serde_json::to_string(&event).unwrap_or_default();
+                        Some(Ok::<Event, std::convert::Infallible>(
+                            Event::default().data(json)
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            }
+        });
+
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("keep-alive"),
+    )
 }

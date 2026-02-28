@@ -12,6 +12,7 @@ use tracing::{error, trace, warn};
 use crate::config;
 use crate::core::{ChannelHub, MediaPeerHub, UserHub};
 use crate::error::LiveError;
+use crate::trace::{TraceDir, TraceEvent, TraceHub};
 use crate::protocol::{
     floor,
     message::{
@@ -34,6 +35,7 @@ pub struct AppState {
     pub channel_hub:    Arc<ChannelHub>,
     pub media_peer_hub: Arc<MediaPeerHub>,
     pub server_cert:    Arc<crate::media::ServerCert>,
+    pub trace_hub:      Arc<TraceHub>,
     pub udp_port:       u16,  // SDP answer candidate 포트
 }
 
@@ -126,6 +128,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         }
 
+        // trace: C→S 수신 이벤트 publish
+        let trace_channel = session.current_channel.as_deref();
+        let trace_user    = session.user_id.as_deref();
+        publish_in_event(&state.trace_hub, packet.op, trace_channel, trace_user);
+
         let result = match packet.op {
             client::HEARTBEAT      => handle_heartbeat(&broadcast_tx).await,
             client::IDENTIFY       => handle_identify(&broadcast_tx, &mut session, &state, packet).await,
@@ -137,9 +144,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             client::CHANNEL_LIST   => handle_channel_list(&broadcast_tx, &state).await,
             client::CHANNEL_INFO   => handle_channel_info(&broadcast_tx, &state, packet).await,
             client::MESSAGE_CREATE => handle_message_create(&broadcast_tx, &session, &state, packet).await,
-            client::FLOOR_REQUEST   => floor::handle_floor_request(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.user_hub, &state.channel_hub, packet).await,
-            client::FLOOR_RELEASE   => floor::handle_floor_release(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.user_hub, &state.channel_hub, packet).await,
-            client::FLOOR_PING      => floor::handle_floor_ping(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.channel_hub, packet).await,
+            client::FLOOR_REQUEST  => floor::handle_floor_request(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.user_hub, &state.channel_hub, &state.trace_hub, packet).await,
+            client::FLOOR_RELEASE  => floor::handle_floor_release(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.user_hub, &state.channel_hub, &state.trace_hub, packet).await,
+            client::FLOOR_PING     => floor::handle_floor_ping(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.channel_hub, packet).await,
             unknown => {
                 warn!("알 수 없는 opcode: {}", unknown);
                 send(&broadcast_tx, error_packet(LiveError::InvalidOpcode(unknown))).await
@@ -271,10 +278,19 @@ async fn handle_channel_join(
     let members   = channel.get_members();
     let event_json = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
         event:      "join".to_string(),
-        channel_id: payload.channel_id,
+        channel_id: payload.channel_id.clone(),
         member:     MemberInfo { user_id: user_id.clone(), ssrc: payload.ssrc },
     });
     state.user_hub.broadcast_to(&members, &event_json, Some(&user_id)).await;
+
+    state.trace_hub.publish(TraceEvent::new(
+        TraceDir::Sys,
+        Some(&payload.channel_id),
+        Some(&user_id),
+        server::CHANNEL_EVENT,
+        "CHANNEL_JOIN",
+        format!("user={} ssrc={}", user_id, payload.ssrc),
+    ));
 
     Ok(())
 }
@@ -672,6 +688,48 @@ fn random_ice_string(len: usize) -> String {
     (0..len)
         .map(|_| charset[rng.gen_range(0..charset.len())] as char)
         .collect()
+}
+
+// ----------------------------------------------------------------------------
+// [Trace 유틸]
+// ----------------------------------------------------------------------------
+
+/// C→S 수신 패킷을 TraceHub에 publish (HEARTBEAT 제외)
+fn publish_in_event(
+    trace_hub:  &TraceHub,
+    op:         u8,
+    channel_id: Option<&str>,
+    user_id:    Option<&str>,
+) {
+    // HEARTBEAT는 노이즈 — 제외
+    if op == client::HEARTBEAT { return; }
+
+    let (op_name, summary) = op_meta_in(op, user_id);
+    trace_hub.publish(TraceEvent::new(
+        TraceDir::In,
+        channel_id,
+        user_id,
+        op,
+        op_name,
+        summary,
+    ));
+}
+
+/// C→S opcode → (이름, 요약)
+fn op_meta_in(op: u8, user_id: Option<&str>) -> (&'static str, String) {
+    let uid = user_id.unwrap_or("-");
+    match op {
+        client::IDENTIFY       => ("IDENTIFY",       format!("user={}", uid)),
+        client::CHANNEL_CREATE => ("CHANNEL_CREATE", format!("user={}", uid)),
+        client::CHANNEL_JOIN   => ("CHANNEL_JOIN",   format!("user={}", uid)),
+        client::CHANNEL_LEAVE  => ("CHANNEL_LEAVE",  format!("user={}", uid)),
+        client::CHANNEL_LIST   => ("CHANNEL_LIST",   format!("user={}", uid)),
+        client::MESSAGE_CREATE => ("MESSAGE_CREATE", format!("user={}", uid)),
+        client::FLOOR_REQUEST  => ("FLOOR_REQUEST",  format!("user={}", uid)),
+        client::FLOOR_RELEASE  => ("FLOOR_RELEASE",  format!("user={}", uid)),
+        client::FLOOR_PING     => ("FLOOR_PING",     format!("user={}", uid)),
+        _                      => ("UNKNOWN",         format!("op={} user={}", op, uid)),
+    }
 }
 
 /// WS 종료 시 클린업

@@ -6,6 +6,7 @@ pub mod error;
 pub mod http;
 pub mod media;
 pub mod protocol;
+pub mod trace;
 pub mod utils;
 
 use axum::{routing::{get, post}, Router};
@@ -17,6 +18,7 @@ use crate::core::{ChannelHub, MediaPeerHub, UserHub};
 use crate::media::{DtlsSessionMap, ServerCert};
 use crate::protocol::{ws_handler, AppState};
 use crate::http::HttpState;
+use crate::trace::TraceHub;
 
 /// CLI에서 주입되는 런타임 설정
 /// - 기본값은 config.rs 상수
@@ -50,11 +52,14 @@ pub async fn run_server(args: ServerArgs) {
     // DTLS 핸드셰이크 세션 맵 (SocketAddr → 패킷 주입 채널)
     let dtls_session_map = Arc::new(DtlsSessionMap::new());
 
+    let trace_hub = TraceHub::new();
+
     let app_state = AppState {
         user_hub:       Arc::clone(&user_hub),
         channel_hub:    Arc::clone(&channel_hub),
         media_peer_hub: Arc::clone(&media_peer_hub),
         server_cert:    Arc::clone(&server_cert),
+        trace_hub:      Arc::clone(&trace_hub),
         udp_port:       args.udp_port,
     };
 
@@ -74,12 +79,14 @@ pub async fn run_server(args: ServerArgs) {
         Arc::clone(&channel_hub),
         Arc::clone(&media_peer_hub),
         Arc::clone(&dtls_session_map),
+        Arc::clone(&trace_hub),
     ));
 
     let http_state = HttpState::new(
         Arc::clone(&user_hub),
         Arc::clone(&channel_hub),
         Arc::clone(&media_peer_hub),
+        Arc::clone(&trace_hub),
     );
 
     let admin_router = Router::new()
@@ -91,6 +98,8 @@ pub async fn run_server(args: ServerArgs) {
         .route("/admin/peers",                  get(http::admin_list_peers))
         .route("/admin/peers/{ufrag}",          get(http::admin_get_peer))
         .route("/admin/floor-revoke/{channel_id}", post(http::admin_floor_revoke))
+        .route("/trace",             get(http::trace_stream))
+        .route("/trace/{channel_id}", get(http::trace_stream))
         .route("/channels",      get(http::list_channels))
         .route("/channels/{id}", get(http::get_channel))
         .with_state(http_state);
@@ -126,6 +135,7 @@ async fn run_zombie_reaper(
     channel_hub:  Arc<ChannelHub>,
     media_hub:    Arc<MediaPeerHub>,
     session_map:  Arc<media::DtlsSessionMap>,
+    trace_hub:    Arc<TraceHub>,
 ) {
     let interval  = tokio::time::Duration::from_millis(config::REAPER_INTERVAL_MS);
     let mut timer = tokio::time::interval(interval);
@@ -168,7 +178,7 @@ async fn run_zombie_reaper(
         }
 
         // 4. Floor 타임아웃 체크 (ping_timeout / max_duration Revoke)
-        crate::protocol::floor::check_floor_timeouts(&user_hub, &channel_hub).await;
+        crate::protocol::floor::check_floor_timeouts_traced(&user_hub, &channel_hub, &trace_hub).await;
 
         let total = dead_users.len() + dead_peers.len() + stale.len();
         if total > 0 {

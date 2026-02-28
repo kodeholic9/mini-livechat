@@ -55,6 +55,7 @@ UDP 미디어 릴레이 (net.rs, ICE Lite + DTLS-SRTP)
 |---|---|
 | `lcserver` | 미디어 릴레이 서버 본체 |
 | `lcadmin` | 운영 관리 CLI — HTTP REST API 기반 원격 조회/조작 |
+| `lctrace` | 실시간 시그널링 관찰 CLI — SSE 기반 이벤트 스트림 |
 
 ---
 
@@ -323,6 +324,66 @@ G: Floor Taken ──── FLOOR_RELEASE ────────────�
 
 ---
 
+## lctrace — 실시간 시그널링 관찰 CLI
+
+서버가 실행 중인 상태에서 시그널링 이벤트를 실시간으로 관찰합니다.  
+SSE(Server-Sent Events)로 서버에 연결하며, 프로세스를 종료(Ctrl+C)하기 전까지 계속 수신합니다.
+
+```bash
+# 전체 이벤트 스트림
+cargo run --bin lctrace
+
+# 특정 채널만
+cargo run --bin lctrace -- CH_0001
+
+# Floor 이벤트만 (전체 채널)
+cargo run --bin lctrace -- --filter floor
+
+# 특정 채널 + Floor 이벤트만
+cargo run --bin lctrace -- CH_0001 --filter floor
+
+# 원격 서버
+cargo run --bin lctrace -- --host 192.168.1.10 --port 8080 CH_0001
+```
+
+### 출력 예시
+
+```
+──────────────────────────────────────────────────────────────────────────────────────────
+  lctrace ▶  http://127.0.0.1:8080/trace/CH_0001
+──────────────────────────────────────────────────────────────────────────────────────────
+  TIME           OP   DIR    OP_NAME                USER                CHANNEL   SUMMARY
+──────────────────────────────────────────────────────────────────────────────────────────
+  09:31:41.900    3 ↓ C→S  IDENTIFY               swift_falcon_4821   —         user=swift_falcon_4821
+  09:31:42.010   11 ↓ C→S  CHANNEL_JOIN           swift_falcon_4821   —         user=swift_falcon_4821
+  09:31:42.015  100 · SYS  CHANNEL_JOIN           swift_falcon_4821   CH_0001   user=swift_falcon_4821 ssrc=...
+  09:31:42.100   30 ↓ C→S  FLOOR_REQUEST          swift_falcon_4821   CH_0001   user=swift_falcon_4821
+  09:31:42.102  110 ↑ S→C  FLOOR_GRANTED          swift_falcon_4821   CH_0001   user=swift_falcon_4821 priority=100
+  09:31:44.200   32 ↓ C→S  FLOOR_PING             swift_falcon_4821   CH_0001   user=swift_falcon_4821
+  09:31:52.301   31 ↓ C→S  FLOOR_RELEASE          swift_falcon_4821   CH_0001   user=swift_falcon_4821
+  09:31:52.303  113 ↑ S→C  FLOOR_RELEASE→IDLE     swift_falcon_4821   CH_0001   user=swift_falcon_4821
+```
+
+### 이벤트 색상
+
+| 색상 | 의미 |
+|---|---|
+| 🟢 초록 bold | FLOOR_GRANTED |
+| 🔴 빨간 bold | FLOOR_REVOKE, FLOOR_DENY |
+| 🟡 노란색 | FLOOR_* (기타) |
+| 🔵 청록색 | CHANNEL_JOIN, CHANNEL_LEAVE |
+| 🟣 자주색 | IDENTIFY |
+
+### SSE 엔드포인트 (직접 호출)
+
+```bash
+# curl로 직접 확인
+curl -N http://127.0.0.1:8080/trace
+curl -N http://127.0.0.1:8080/trace/CH_0001
+```
+
+---
+
 ## Admin REST API
 
 `lcadmin` CLI가 내부적으로 사용하는 HTTP 엔드포인트입니다. `curl` 등으로 직접 호출도 가능합니다.
@@ -382,6 +443,7 @@ cargo test --test integration_test
 | 좀비 세션/피어 자동 종료 | ✅ 완료 |
 | 사전 정의 채널 자동 생성 | ✅ 완료 |
 | 운영 관리 CLI (lcadmin) | ✅ 완료 |
+| 실시간 시그널링 관찰 CLI (lctrace) | ✅ 완료 |
 | STUN keepalive 핫패스 최적화 | ✅ 완료 |
 | net.rs SO_REUSEPORT + recvmmsg | 🔲 부하 테스트 후 적용 예정 |
 
