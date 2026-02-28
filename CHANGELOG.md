@@ -46,6 +46,19 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.20.1] - 2026-02-28
+
+### Floor Control 버그 수정 — non-holder RELEASE 시 큐 미제거
+
+#### src/protocol/floor.rs
+
+- `handle_floor_release()` — non-holder가 FLOOR_RELEASE를 보낸 경우 `remove_from_queue()` 호출 추가
+  - 이전: warn 로그만 찍고 무시 → 큐에 좀비로 남아 holder가 release하면 취소한 사용자에게 자동 GRANTED
+  - 수정: 큐에서 깔끔하게 제거 후 return (상태 전이 없음)
+  - warn! → trace! 레벨 변경 (정상 동작이므로)
+
+---
+
 ## [0.20.0] - 2026-02-28
 
 ### 리팩터링 — 모듈 분리 + 단위 테스트 71개

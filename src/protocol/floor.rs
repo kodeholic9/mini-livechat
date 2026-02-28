@@ -304,7 +304,9 @@ pub async fn handle_floor_release(
     let (packets, next_holder) = {
         let mut floor = channel.floor.lock().unwrap();
         if floor.floor_taken_by.as_deref() != Some(user_id) {
-            warn!("FLOOR_RELEASE non-holder: user={} channel={}", user_id, channel_id);
+            // non-holder → 큐에서 제거만 하고 종료 (상태 전이 없음)
+            floor.remove_from_queue(user_id);
+            trace!("FLOOR_RELEASE queue-remove: user={} channel={}", user_id, channel_id);
             return Ok(());
         }
         let pkts = decide_next(channel_id, &mut floor, &members);
