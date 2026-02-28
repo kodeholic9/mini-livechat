@@ -46,9 +46,21 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.20.3] - 2026-02-28
+
+### Admin Floor Revoke 클라이언트 통지 추가
+
+#### src/http/admin.rs
+
+- `admin_floor_revoke()` — Floor 강제 회수 시 클라이언트 통지 추가
+  - 이전: Floor 상태만 초기화, 클라이언트는 모르는 상태
+  - 수정: holder에게 FLOOR_REVOKE(cause="admin_revoke") 전송 + 전체 멤버에게 FLOOR_IDLE 브로드캠스트
+
+---
+
 ## [0.20.2] - 2026-02-28
 
-### CORS 허용 + Floor Control 버그 수정
+### CORS 허용
 
 #### Cargo.toml
 

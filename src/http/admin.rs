@@ -22,6 +22,8 @@ use axum::{
 use std::sync::atomic::Ordering;
 
 use crate::core::FloorControlState;
+use crate::protocol::message::{FloorIdlePayload, FloorRevokePayload, GatewayPacket};
+use crate::protocol::opcode::server;
 use crate::utils::current_timestamp;
 
 use super::dto::*;
@@ -291,6 +293,30 @@ pub async fn admin_floor_revoke(
     }
 
     tracing::warn!("[admin] floor-revoke channel={} was_held_by={:?}", channel_id, holder);
+
+    // holder에게 FLOOR_REVOKE 전송
+    if let Some(ref holder_id) = holder {
+        let revoke_json = serde_json::to_string(&GatewayPacket::new(
+            server::FLOOR_REVOKE,
+            FloorRevokePayload {
+                channel_id: channel_id.clone(),
+                cause: "admin_revoke".to_string(),
+            },
+        )).unwrap_or_default();
+        if let Some(user) = state.user_hub.get(holder_id) {
+            let _ = user.tx.send(revoke_json).await;
+        }
+    }
+
+    // 전체 멤버에게 FLOOR_IDLE 전송
+    let idle_json = serde_json::to_string(&GatewayPacket::new(
+        server::FLOOR_IDLE,
+        FloorIdlePayload {
+            channel_id: channel_id.clone(),
+        },
+    )).unwrap_or_default();
+    let members = channel.get_members();
+    state.user_hub.broadcast_to(&members, &idle_json, None).await;
 
     Json(serde_json::json!({
         "ok": true,
