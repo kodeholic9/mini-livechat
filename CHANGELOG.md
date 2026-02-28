@@ -46,6 +46,22 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.20.2] - 2026-02-28
+
+### CORS 허용 + Floor Control 버그 수정
+
+#### Cargo.toml
+
+- `tower-http = { version = "0.6", features = ["cors"] }` 추가
+
+#### src/lib.rs
+
+- `CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any)` 적용
+  - Admin 대시보드, PTT 클라이언트 로컬 접속 시 CORS 이슈 해소
+  - 내부 네트워크 전용 서버이므로 전체 허용
+
+---
+
 ## [0.20.1] - 2026-02-28
 
 ### Floor Control 버그 수정 — non-holder RELEASE 시 큐 미제거

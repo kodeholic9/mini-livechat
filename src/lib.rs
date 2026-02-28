@@ -13,6 +13,7 @@ pub mod utils;
 use axum::{routing::{get, post}, Router};
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info};
 
 use crate::core::{ChannelHub, MediaPeerHub, UserHub};
@@ -105,10 +106,17 @@ pub async fn run_server(args: ServerArgs) {
         .route("/channels/{id}", get(http::get_channel))
         .with_state(http_state);
 
+    // CORS — 개발/운영 모두 전체 허용 (Admin 대시보드, PTT 클라이언트 로컬 접속)
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .with_state(app_state)
-        .merge(admin_router);
+        .merge(admin_router)
+        .layer(cors);
 
     let addr     = format!("0.0.0.0:{}", args.port);
     let listener = TcpListener::bind(&addr).await.unwrap();
