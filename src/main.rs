@@ -27,10 +27,14 @@ async fn main() {
 
     let args = Args::parse();
 
+    // advertise_ip: CLI 인자 > 환경변수 ADVERTISE_IP > None(자동 감지)
+    let advertise_ip = args.advertise_ip
+        .or_else(|| std::env::var("ADVERTISE_IP").ok().filter(|s| !s.is_empty()));
+
     run_server(ServerArgs {
         port:         args.port,
         udp_port:     args.udp_port,
-        advertise_ip: args.advertise_ip,
+        advertise_ip,
     })
     .await;
 }
