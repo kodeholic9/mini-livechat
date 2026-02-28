@@ -241,6 +241,11 @@ pub async fn handle_floor_request(
                 server::FLOOR_GRANTED, "FLOOR_GRANTED",
                 format!("user={} priority={}", user_id, priority),
             ));
+            trace_hub.publish(TraceEvent::new(
+                TraceDir::Out, Some(&channel_id), Some(user_id),
+                server::FLOOR_TAKEN, "FLOOR_TAKEN",
+                format!("holder={}", user_id),
+            ));
         }
         Action::Preempt { revoke_json, granted_json, taken_json, old_holder } => {
             if let Some(holder_user) = user_hub.get(&old_holder) {
@@ -250,9 +255,19 @@ pub async fn handle_floor_request(
             user_hub.broadcast_to(&members, &taken_json, Some(user_id)).await;
             warn!("Floor Preempted: channel={} old={} new={}", channel_id, old_holder, user_id);
             trace_hub.publish(TraceEvent::new(
+                TraceDir::Out, Some(&channel_id), Some(&old_holder),
+                server::FLOOR_REVOKE, "FLOOR_REVOKE(PREEMPT)",
+                format!("revoked={} by={}", old_holder, user_id),
+            ));
+            trace_hub.publish(TraceEvent::new(
                 TraceDir::Out, Some(&channel_id), Some(user_id),
                 server::FLOOR_GRANTED, "FLOOR_GRANTED(PREEMPT)",
                 format!("new={} old={} priority={}", user_id, old_holder, priority),
+            ));
+            trace_hub.publish(TraceEvent::new(
+                TraceDir::Out, Some(&channel_id), Some(user_id),
+                server::FLOOR_TAKEN, "FLOOR_TAKEN",
+                format!("holder={}", user_id),
             ));
         }
         Action::Queued { pos_json } => {
@@ -286,21 +301,44 @@ pub async fn handle_floor_release(
         .ok_or_else(|| LiveError::ChannelNotFound(channel_id.clone()))?;
     let members = channel.get_members();
 
-    let packets = {
+    let (packets, next_holder) = {
         let mut floor = channel.floor.lock().unwrap();
         if floor.floor_taken_by.as_deref() != Some(user_id) {
             warn!("FLOOR_RELEASE non-holder: user={} channel={}", user_id, channel_id);
             return Ok(());
         }
-        decide_next(channel_id, &mut floor, &members)
+        let pkts = decide_next(channel_id, &mut floor, &members);
+        let next = floor.floor_taken_by.clone(); // Grant된 다음 holder (없으면 None = Idle)
+        (pkts, next)
         // MutexGuard drop here
     };
 
+    // Release trace
     trace_hub.publish(TraceEvent::new(
         TraceDir::Out, Some(channel_id), Some(user_id),
-        server::FLOOR_IDLE, "FLOOR_RELEASE→IDLE",
-        format!("user={}", user_id),
+        server::FLOOR_IDLE, "FLOOR_RELEASE",
+        format!("released_by={}", user_id),
     ));
+
+    // 다음 holder가 있으면 GRANTED + TAKEN trace
+    if let Some(ref next_uid) = next_holder {
+        trace_hub.publish(TraceEvent::new(
+            TraceDir::Out, Some(channel_id), Some(next_uid),
+            server::FLOOR_GRANTED, "FLOOR_GRANTED(QUEUE)",
+            format!("user={}", next_uid),
+        ));
+        trace_hub.publish(TraceEvent::new(
+            TraceDir::Out, Some(channel_id), Some(next_uid),
+            server::FLOOR_TAKEN, "FLOOR_TAKEN",
+            format!("holder={}", next_uid),
+        ));
+    } else {
+        trace_hub.publish(TraceEvent::new(
+            TraceDir::Out, Some(channel_id), None,
+            server::FLOOR_IDLE, "FLOOR_IDLE",
+            format!("channel={}", channel_id),
+        ));
+    }
 
     dispatch_packets(packets, &members, user_hub).await;
     Ok(())

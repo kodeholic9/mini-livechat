@@ -29,7 +29,7 @@ GIT_BRANCH="main"
 BINARIES=("lcserver" "lcadmin" "lctrace")
 
 # 기본 실행 옵션 (lcserver CLI 인자)
-LCSERVER_ARGS="--port 3100 --udp-port 40000"
+LCSERVER_ARGS="--port 1794 --udp-port 19740"
 
 # --- 컬러 출력 ---
 RED='\033[0;31m'
