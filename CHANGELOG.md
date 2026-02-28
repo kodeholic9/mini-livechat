@@ -46,6 +46,61 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.20.0] - 2026-02-28
+
+### 리팩터링 — 모듈 분리 + 단위 테스트 71개
+
+기능 확장 시 최소 파일만 수정하도록 모노리식 파일들을 도메인별로 분리.
+로직 변경 없이 파일 분리 + re-export + import 경로만 변경.
+Rust 2018 edition 스타일 (`core.rs` + `core/` 디렉터리) 적용, `mod.rs` 미사용.
+
+#### core.rs 분리 (18.2KB → 4개 파일)
+
+- `core.rs` → 서브모듈 선언 + re-export
+- `core/user.rs` — UserHub, User, BroadcastTx
+- `core/channel.rs` — ChannelHub, Channel
+- `core/floor.rs` — FloorControl, FloorControlState, FloorIndicator, FloorQueueEntry
+- `core/media_peer.rs` — MediaPeerHub, Endpoint, Track, TrackKind
+
+#### http.rs 분리 (18.9KB → 5개 파일)
+
+- `http.rs` → 서브모듈 선언 + re-export
+- `http/state.rs` — HttpState
+- `http/dto.rs` — 응답 DTO 17개
+- `http/admin.rs` — Admin REST 핸들러 8개
+- `http/channel.rs` — 일반 채널 조회 핸들러
+- `http/trace.rs` — Trace SSE 스트림 핸들러
+
+#### protocol/protocol.rs SDP 분리
+
+- `protocol/sdp.rs` 신규 — `build_sdp_answer()`, `detect_local_ip()`, `random_ice_string()`
+- `protocol/protocol.rs`에서 ~150줄 제거, `sdp.rs` import로 대체
+
+#### Floor 코드 중복 제거
+
+- `check_floor_timeouts()` + `check_floor_timeouts_traced()` 복사본 2개
+  → `check_floor_timeouts(..., trace_hub: Option<&Arc<TraceHub>>)` 1개로 통합
+- ~40줄 중복 코드 제거
+
+#### lib.rs → reaper.rs 분리
+
+- `run_zombie_reaper()` → `reaper.rs` 독립 모듈
+- `lib.rs`는 모듈 선언 + `run_server()` 오케스트레이션만 담당
+
+#### 단위 테스트 71개 작성 (cargo test 전체 통과)
+
+- `core/user.rs` — 7개 (register/unregister/count/duplicate/all_users/touch/zombie)
+- `core/channel.rs` — 8개 (create/duplicate/remove/add_member/capacity/dup_member/remove_member/floor_count)
+- `core/floor.rs` — 14개 (상태전이/enqueue우선순위/중복enqueue/remove/position/preempt 3종/ping/timeout 3종)
+- `core/media_peer.rs` — 9개 (insert/latch/latch_unknown/remove/channel_filter/count/track_dedup/address/zombie)
+- `error.rs` — 6개 (코드범위 1xxx/2xxx/3xxx/9xxx + display + 범위검증)
+- `protocol/sdp.rs` — 14개 (ice_string 3개 + SDP answer 8개 + BUNDLE 2개 + detect_ip 1개)
+- `trace.rs` — 4개 (no_subscriber/subscribe/multi_subscriber/json직렬화)
+- `media/srtp.rs` — 5개 (기존)
+- `media/net.rs` — 4개 (기존)
+
+---
+
 ## [0.19.0] - 2026-02-28
 
 ### 비디오 지원 추가 (BUNDLE 확장)

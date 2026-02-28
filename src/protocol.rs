@@ -4,6 +4,7 @@ pub mod floor;
 pub mod message;
 pub mod opcode;
 pub mod protocol;
+pub mod sdp;
 
 pub use protocol::{ws_handler, AppState};
 
@@ -23,5 +24,5 @@ pub fn get_advertise_ip() -> String {
     ADVERTISE_IP
         .get()
         .cloned()
-        .unwrap_or_else(|| protocol::detect_local_ip()) // fallback
+        .unwrap_or_else(|| sdp::detect_local_ip()) // fallback
 }

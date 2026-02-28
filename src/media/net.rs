@@ -66,7 +66,7 @@ pub async fn run_udp_relay(
 ) {
     // advertise_ip: SDP candidate에 광고할 IP
     // None이면 라우팅 테이블 기반 자동 감지
-    let adv_ip = advertise_ip.unwrap_or_else(|| crate::protocol::protocol::detect_local_ip());
+    let adv_ip = advertise_ip.unwrap_or_else(|| crate::protocol::sdp::detect_local_ip());
     info!("[media] advertise IP: {}", adv_ip);
 
     // 라우팅 테이블에 광고 IP 저장 (이후 SDP answer 생성 시 사용)

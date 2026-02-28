@@ -342,10 +342,11 @@ pub async fn handle_floor_ping(
 // ----------------------------------------------------------------------------
 
 /// 모든 채널의 Floor 상태를 순회하며 타임아웃/max_duration Revoke 처리
-/// 반환: 채널수에 비례, Taken 상태 채널만 실질 작업 수행
+/// trace_hub: Some이면 Revoke 이벤트 publish, None이면 생략
 pub async fn check_floor_timeouts(
     user_hub:    &Arc<UserHub>,
     channel_hub: &Arc<ChannelHub>,
+    trace_hub:   Option<&Arc<TraceHub>>,
 ) {
     let channel_ids: Vec<String> = {
         channel_hub.channels.read().unwrap().keys().cloned().collect()
@@ -402,75 +403,13 @@ pub async fn check_floor_timeouts(
             if let Some(user) = user_hub.get(&holder) {
                 let _ = user.tx.send(revoke_json).await;
             }
-            dispatch_packets(packets, &members, user_hub).await;
-        }
-    }
-}
-
-/// check_floor_timeouts의 TraceHub 포함 버전
-pub async fn check_floor_timeouts_traced(
-    user_hub:    &Arc<UserHub>,
-    channel_hub: &Arc<ChannelHub>,
-    trace_hub:   &Arc<TraceHub>,
-) {
-    let channel_ids: Vec<String> = {
-        channel_hub.channels.read().unwrap().keys().cloned().collect()
-    };
-
-    for channel_id in channel_ids {
-        let channel = match channel_hub.get(&channel_id) {
-            Some(ch) => ch,
-            None     => continue,
-        };
-
-        enum Action {
-            Skip,
-            Revoke {
-                cause:       String,
-                holder:      String,
-                revoke_json: String,
-                packets:     Vec<(Option<String>, Option<String>, String)>,
-                members:     std::collections::HashSet<String>,
-            },
-        }
-
-        let action = {
-            let mut floor = channel.floor.lock().unwrap();
-            if floor.state != FloorControlState::Taken {
-                Action::Skip
-            } else if floor.is_max_taken_exceeded() {
-                let holder      = floor.floor_taken_by.clone().unwrap_or_default();
-                let revoke_json = make_packet(server::FLOOR_REVOKE, FloorRevokePayload {
-                    channel_id: channel_id.clone(),
-                    cause:      "max_duration".to_string(),
-                });
-                let members = channel.get_members();
-                let packets = decide_next(&channel_id, &mut floor, &members);
-                Action::Revoke { cause: "max_duration".to_string(), holder, revoke_json, packets, members }
-            } else if floor.is_ping_timeout() {
-                let holder      = floor.floor_taken_by.clone().unwrap_or_default();
-                let revoke_json = make_packet(server::FLOOR_REVOKE, FloorRevokePayload {
-                    channel_id: channel_id.clone(),
-                    cause:      "ping_timeout".to_string(),
-                });
-                let members = channel.get_members();
-                let packets = decide_next(&channel_id, &mut floor, &members);
-                Action::Revoke { cause: "ping_timeout".to_string(), holder, revoke_json, packets, members }
-            } else {
-                Action::Skip
+            if let Some(th) = trace_hub {
+                th.publish(TraceEvent::new(
+                    TraceDir::Sys, Some(&channel_id), Some(&holder),
+                    server::FLOOR_REVOKE, "FLOOR_REVOKE",
+                    format!("cause={} user={}", cause, holder),
+                ));
             }
-        };
-
-        if let Action::Revoke { cause, holder, revoke_json, packets, members } = action {
-            warn!("Floor Revoke ({}): channel={} user={}", cause, channel_id, holder);
-            if let Some(user) = user_hub.get(&holder) {
-                let _ = user.tx.send(revoke_json).await;
-            }
-            trace_hub.publish(TraceEvent::new(
-                TraceDir::Sys, Some(&channel_id), Some(&holder),
-                server::FLOOR_REVOKE, "FLOOR_REVOKE",
-                format!("cause={} user={}", cause, holder),
-            ));
             dispatch_packets(packets, &members, user_hub).await;
         }
     }

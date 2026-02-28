@@ -84,3 +84,71 @@ impl LiveError {
 }
 
 pub type LiveResult<T> = Result<T, LiveError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_codes_1xxx_auth() {
+        assert_eq!(LiveError::NotAuthenticated.code(), 1000);
+        assert_eq!(LiveError::InvalidToken.code(), 1001);
+        assert_eq!(LiveError::InvalidOpcode(99).code(), 1003);
+        assert_eq!(LiveError::InvalidPayload("x".into()).code(), 1004);
+    }
+
+    #[test]
+    fn error_codes_2xxx_channel() {
+        assert_eq!(LiveError::ChannelNotFound("c".into()).code(), 2000);
+        assert_eq!(LiveError::ChannelFull("c".into()).code(), 2001);
+        assert_eq!(LiveError::ChannelAccessDenied("c".into()).code(), 2002);
+        assert_eq!(LiveError::AlreadyInChannel("c".into()).code(), 2003);
+        assert_eq!(LiveError::NotInChannel("c".into()).code(), 2004);
+    }
+
+    #[test]
+    fn error_codes_3xxx_message() {
+        assert_eq!(LiveError::EmptyMessage.code(), 3000);
+        assert_eq!(LiveError::MessageTooLong(9999).code(), 3001);
+        assert_eq!(LiveError::MessageNotInChannel("c".into()).code(), 3002);
+    }
+
+    #[test]
+    fn error_codes_9xxx_internal() {
+        assert_eq!(LiveError::InternalError("e".into()).code(), 9000);
+    }
+
+    #[test]
+    fn display_contains_context() {
+        let e = LiveError::ChannelFull("CH_001".into());
+        let msg = format!("{}", e);
+        assert!(msg.contains("CH_001"));
+    }
+
+    #[test]
+    fn error_code_ranges_no_overlap() {
+        // 모든 코드가 정의된 범위 내에 있는지 확인
+        let codes = vec![
+            LiveError::NotAuthenticated.code(),
+            LiveError::InvalidToken.code(),
+            LiveError::InvalidOpcode(0).code(),
+            LiveError::InvalidPayload(String::new()).code(),
+            LiveError::ChannelNotFound(String::new()).code(),
+            LiveError::ChannelFull(String::new()).code(),
+            LiveError::ChannelAccessDenied(String::new()).code(),
+            LiveError::AlreadyInChannel(String::new()).code(),
+            LiveError::NotInChannel(String::new()).code(),
+            LiveError::EmptyMessage.code(),
+            LiveError::MessageTooLong(0).code(),
+            LiveError::MessageNotInChannel(String::new()).code(),
+            LiveError::InternalError(String::new()).code(),
+        ];
+        for &c in &codes {
+            let range_ok = (1000..2000).contains(&c)
+                || (2000..3000).contains(&c)
+                || (3000..4000).contains(&c)
+                || (9000..10000).contains(&c);
+            assert!(range_ok, "code {} out of defined ranges", c);
+        }
+    }
+}
