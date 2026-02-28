@@ -283,6 +283,29 @@ async fn handle_channel_join(
     });
     state.user_hub.broadcast_to(&members, &event_json, Some(&user_id)).await;
 
+    // 6. Floor Taken 상태라면 신규 입장자에게 FLOOR_TAKEN 전송
+    //    MutexGuard가 await를 걸치면 Send 불만족 → 동기 블록에서 패킷 문자열만 추출,
+    //    Guard는 블록 끝에서 drop되고 await는 그 다음에 실행됨
+    let floor_taken_packet: Option<String> = {
+        use crate::core::FloorControlState;
+        use crate::protocol::message::{FloorTakenPayload, FloorIndicatorDto};
+        let floor = channel.floor.lock().unwrap();
+        if floor.state == FloorControlState::Taken {
+            floor.floor_taken_by.as_ref().map(|holder| {
+                make_packet(server::FLOOR_TAKEN, FloorTakenPayload {
+                    channel_id: payload.channel_id.clone(),
+                    user_id:    holder.clone(),
+                    indicator:  FloorIndicatorDto::Normal,
+                })
+            })
+        } else {
+            None
+        }
+    }; // ← MutexGuard 여기서 drop
+    if let Some(pkt) = floor_taken_packet {
+        let _ = tx.send(pkt).await;
+    }
+
     state.trace_hub.publish(TraceEvent::new(
         TraceDir::Sys,
         Some(&payload.channel_id),

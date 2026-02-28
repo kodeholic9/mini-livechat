@@ -430,11 +430,26 @@ function pttStart() {
 function pttStop() {
   if (!state.pttActive) return;
   state.pttActive = false;
+
   if (state.floorState === 'taken' && state.floorHolder === state.userId) {
-    _stopFloorPing(); // RELEASE 전 Ping 정지
+    // 내가 holder — 발언권 반납
+    _stopFloorPing();
     wsSend({ op: 31, d: { channel_id: state.channel } });
-  }
-  if (state.floorState === 'requesting') {
+
+  } else if (state.floorState === 'requesting') {
+    // 아직 GRANTED 전 — 서버에 취소 의사 전달 (FLOOR_RELEASE로 대기열/요청 취소)
+    wsSend({ op: 31, d: { channel_id: state.channel } });
+    setAudioTransmission(false);
+    _resetFloorUI();
+
+  } else if (state.floorState === 'queued') {
+    // 대기열에 있는 상태 — 서버에 RELEASE 보내 대기열에서 제거
+    wsSend({ op: 31, d: { channel_id: state.channel } });
+    setAudioTransmission(false);
+    _resetFloorUI();
+
+  } else {
+    // 예외: 상태 불명확 시 UI만 리셋
     setAudioTransmission(false);
     _resetFloorUI();
   }
@@ -491,21 +506,28 @@ function onFloorTaken(d) {
 
 function onFloorIdle(d) {
   const prevHolder = state.floorHolder;
-  const wasMine = prevHolder === $('user-id').value.trim();
+  const myId = $('user-id').value.trim();
+  const wasMine = prevHolder === myId;
+  const wasQueued = state.floorState === 'queued';  // 상태 변경 전에 캐시
 
+  // 상태 먼저 수정
   state.floorState = 'idle';
   state.floorHolder = null;
-  setState('floor', 'IDLE');
-  setState('holder', '—');
-  setState('queue', '—');
   if (prevHolder) _setMemberSpeaking(prevHolder, false);
 
   if (wasMine) {
+    // 내가 holder였음 — 전송 중단 + UI 리셋
     _stopFloorPing();
     setAudioTransmission(false);
+    state.pttActive = false;
+    _resetFloorUI();
+  } else if (wasQueued || state.pttActive) {
+    // 대기열에 있었거나 pttActive가 남아있는 코너케이스 — 완전 리셋
+    // (holder가 바뀌는 경우 FLOOR_GRANTED를 연이어 받아야 정상, 그 전에 IDLE이 오면 선점에서 리셋)
+    state.pttActive = false;
     _resetFloorUI();
   } else {
-    $('ptt-btn').textContent = '● PUSH TO TALK';
+    _resetFloorUI();
   }
 
   log('sys', `FLOOR_IDLE — ${d.channel_id}`);
@@ -513,16 +535,21 @@ function onFloorIdle(d) {
 
 function onFloorRevoke(d) {
   const wasMine = state.floorHolder === $('user-id').value.trim();
+
   state.pttActive = false;
   state.floorState = 'idle';
-
-  if (wasMine) _stopFloorPing();
-  setAudioTransmission(false);
-  _resetFloorUI();
+  state.floorHolder = null;
 
   if (wasMine) {
+    _stopFloorPing();
+    setAudioTransmission(false);
     log('sys', `FLOOR_REVOKE — cause: ${d.cause}`, 'err');
+  } else {
+    // 대기열에 있다가 preempt로 받은 경우— 전송 차단
+    setAudioTransmission(false);
+    log('sys', `FLOOR_REVOKE — cause: ${d.cause} (queue 취소)`);
   }
+  _resetFloorUI();
 }
 
 function onFloorQueuePos(d) {

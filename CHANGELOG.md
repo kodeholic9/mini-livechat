@@ -6,10 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ## [TODO] (다음 세션)
 
-### 즉시 해야 할 것 — `cargo build` 통과 확인
+### 비디오 지원
 
-- [ ] `cargo build` 실행 후 컴파일 에러 없는지 확인
-- [ ] warning 정리 (미사용 변수, dead_code 등)
+- [ ] `build_sdp_answer()` — `m=video` 섹션 미러링 추가 (audio와 동일 패턴)
+- [ ] `client/app.js` — `getUserMedia({ video: true })`, `addTrack(videoTrack)` 추가
+- [ ] `client/app.js` — `setMediaTransmission()` 으로 확장 (video sender 동시 제어)
+- [ ] `client/app.js` — `ontrack` 에서 수신 video → `<video>` 엘리먼트 연결
+- [ ] `client/index.html` — `<video>` 태그 추가 (로컬 프리뷰 + 리모트 수신용)
 
 ### E2E 시나리오 테스트 (브라우저 2탭)
 
@@ -43,6 +46,27 @@ All notable changes to this project will be documented in this file.
 - [ ] 복호화된 RTP → 채널 내 다른 피어 relay
 - [ ] Floor Taken 상태일 때만 릴레이 (holder → others)
 - [ ] Floor Idle 상태에서 수신된 RTP는 drop 또는 버퍼
+
+---
+
+## [0.18.0] - 2026-02-28
+
+### Floor Control 버그 수정 2종
+
+#### src/protocol/protocol.rs
+
+- `handle_channel_join()` — 신규 입장자에게 FLOOR_TAKEN 전송 추가
+  - 입장 시체널이 Taken 상태면 신규 입장자 혹시만한테 `FLOOR_TAKEN` 전송
+  - BUNDLE 환경에서 SRTP는 흐르지만 클라이언트 UI가 idle 로 남는 문제 해소
+  - `MutexGuard`가 await를 걸치면 `Send` 불만족 → 동기 블록에서 패킷 문자열만 추출, Guard는 블록 끝에서 drop
+
+#### client/app.js
+
+- `pttStop()` — `queued` 상태에서 PTT OFF 시 `FLOOR_RELEASE` 미전송 버그 수정
+  - `requesting` / `queued` 분기 추가, 모든 경로에서 서버에 `FLOOR_RELEASE` 전송
+- `onFloorIdle()` — `wasQueued` 상태를 수정 전에 케시, `pttActive` 강제 리셋 추가
+  - `state.floorState = 'idle'` 후 `=== 'queued'` 체크로 항상 false 되던 로직 버그 해소
+- `onFloorRevoke()` — `floorHolder` null 정리 추가, wasMine/not-wasMine 경로 명확화
 
 ---
 
