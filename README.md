@@ -19,6 +19,10 @@ WebSocket Gateway (Axum, TCP)
     ├── MESSAGE_CREATE → ChannelHub 멤버 목록 → UserHub.broadcast_to()
     └── CHANNEL_LEAVE / WS 종료 → 자동 클린업
 
+HTTP REST API (Axum, TCP — 동일 포트)
+    ├── GET  /channels, /channels/{id}          일반 조회
+    └── GET|POST /admin/*                       운영 관리 (lcadmin CLI 연동)
+
 UDP 미디어 릴레이 (net.rs, ICE Lite + DTLS-SRTP)
     │
     ├── STUN  → ICE ufrag 파싱 → MediaPeerHub latch → Binding Response
@@ -45,31 +49,43 @@ UDP 미디어 릴레이 (net.rs, ICE Lite + DTLS-SRTP)
 
 ---
 
+## 바이너리
+
+| 바이너리 | 설명 |
+|---|---|
+| `lcserver` | 미디어 릴레이 서버 본체 |
+| `lcadmin` | 운영 관리 CLI — HTTP REST API 기반 원격 조회/조작 |
+
+---
+
 ## 빌드 및 실행
 
 ```bash
-# 빌드
+# 빌드 (디버그)
+cargo build
+
+# 빌드 (릴리즈)
 cargo build --release
 
-# 기본 실행 (포트/IP 기본값 사용)
-cargo run
+# 서버 실행 (기본값)
+cargo run --bin lcserver
 
 # CLI 인자로 설정 주입
-cargo run -- --port 8080 --udp-port 10000
+cargo run --bin lcserver -- --port 8080 --udp-port 10000
 
 # 외부 공인 IP 수동 지정 (도커/NAT 환경)
-cargo run -- --port 8080 --udp-port 10000 --advertise-ip 203.0.113.10
+cargo run --bin lcserver -- --port 8080 --udp-port 10000 --advertise-ip 203.0.113.10
 
 # 로그 레벨 설정
-RUST_LOG=info cargo run
-RUST_LOG=trace cargo run -- --port 8080 --udp-port 10000
+RUST_LOG=info cargo run --bin lcserver
+RUST_LOG=trace cargo run --bin lcserver -- --port 8080 --udp-port 10000
 ```
 
-### CLI 인자
+### 서버 CLI 인자
 
 | 인자 | 기본값 | 설명 |
 |---|---|---|
-| `--port` | `8080` | WebSocket 시그널링 서버 TCP 포트 |
+| `--port` | `8080` | WebSocket + HTTP REST 공용 TCP 포트 |
 | `--udp-port` | `10000` | UDP 미디어 릴레이 포트 |
 | `--advertise-ip` | 자동 감지 | SDP candidate에 광고할 IP. 생략 시 라우팅 테이블로 로컬 IP 자동 감지 |
 
@@ -84,12 +100,104 @@ RUST_LOG=trace cargo run -- --port 8080 --udp-port 10000
 
 ---
 
+## lcadmin — 운영 관리 CLI
+
+서버가 실행 중인 상태에서 별도 터미널로 실행합니다.  
+HTTP REST API를 통해 조회/조작하므로 서버 재시작 없이 실시간 확인 가능합니다.
+
+```bash
+# 기본 사용법 (로컬 서버 8080 포트)
+cargo run --bin lcadmin -- <command>
+
+# 원격 서버 접속
+cargo run --bin lcadmin -- --host 192.168.1.10 --port 8080 <command>
+
+# 릴리즈 빌드 후 직접 실행
+lcadmin --host 127.0.0.1 --port 8080 <command>
+```
+
+### 조회 명령
+
+```bash
+# 서버 상태 요약 (uptime, 접속자 수, Floor 활성 채널 수)
+lcadmin status
+
+# User 전체 테이블 (user_id, 우선순위, 마지막 heartbeat 이후 경과)
+lcadmin users
+
+# User 상세 (소속 채널 포함)
+lcadmin users swift_falcon_4821
+
+# Channel 전체 테이블 (Floor 상태, holder, 대기열 수)
+lcadmin channels
+
+# Channel 상세 (멤버 목록, Floor 대기열, Peer 목록)
+lcadmin channels CH_0001
+
+# Endpoint(Peer) 전체 테이블 (ufrag, address, SRTP 준비 여부)
+lcadmin peers
+
+# Endpoint 상세 (tracks 포함)
+lcadmin peers abcd1234efgh5678
+```
+
+### 조작 명령
+
+```bash
+# Floor 강제 revoke (holder + 대기열 모두 초기화, Idle 복귀)
+lcadmin floor-revoke CH_0001
+```
+
+### 실행 예시
+
+```
+$ lcadmin status
+
+  mini-livechat Server Status
+  ────────────────────────────────────
+  Uptime:          0h 12m 34s
+  Users:           3
+  Channels:        3
+  Peers:           2
+  Floor Active:    1
+
+$ lcadmin channels
+
+ CHANNEL ID  FREQ  NAME              MEMBERS  CAP  FLOOR    HOLDER              Q
+ CH_0001     0001  📢 영업/시연      2        20   ● TAKEN  swift_falcon_4821   0
+ CH_0002     0002  🤝 스스 파트너스  1        20   ○ idle   -                   0
+ CH_0003     0003  🏠 동천 패밀리    0        20   ○ idle   -                   0
+
+$ lcadmin channels CH_0001
+
+  Channel: CH_0001 [0001] 📢 영업/시연
+  ────────────────────────────────────────────────
+  Capacity:          2/20
+  Created:           day+20511 09:30:00 UTC
+  Floor:             ● TAKEN (holder: swift_falcon_4821, 8s 경과, priority: 100)
+
+  Members
+    · swift_falcon_4821
+    · brave_wolf_1234
+
+  Peers
+   UFRAG             USER ID             CHANNEL   IDLE(s)  SRTP
+   abcd1234efgh5678  swift_falcon_4821   CH_0001   0        true
+   wxyz9876mnop5432  brave_wolf_1234     CH_0001   1        true
+
+$ lcadmin floor-revoke CH_0001
+
+  Floor Revoke OK channel=CH_0001 revoked_from=swift_falcon_4821
+```
+
+---
+
 ## 프로토콜
 
 디스코드 Gateway 스타일 opcode 기반 패킷 구조를 채택합니다.
 
 ```json
-{ "op": 11, "d": { "channel_id": "CH_001", "ssrc": 12345, "ufrag": "abcd1234" } }
+{ "op": 11, "d": { "channel_id": "CH_0001", "ssrc": 12345, "ufrag": "abcd1234" } }
 ```
 
 ### Client → Server Opcodes
@@ -106,8 +214,8 @@ RUST_LOG=trace cargo run -- --port 8080 --udp-port 10000
 | 15 | CHANNEL_LIST | 채널 목록 조회 |
 | 16 | CHANNEL_INFO | 채널 상세 조회 |
 | 20 | MESSAGE_CREATE | 채팅 메시지 전송 |
-| 30 | FLOOR_REQUEST | PTT 누름 — 발언권 요청 |
-| 31 | FLOOR_RELEASE | PTT 놓음 — 발언권 반납 |
+| 30 | FLOOR_REQUEST | PTT — 발언권 요청 |
+| 31 | FLOOR_RELEASE | PTT — 발언권 반납 |
 | 32 | FLOOR_PING | holder 생존 신호 (GRANTED 후 2초 주기 자율 전송) |
 
 ### Server → Client Opcodes
@@ -155,14 +263,14 @@ RUST_LOG=trace cargo run -- --port 8080 --udp-port 10000
     │    [ICE + DTLS 핸드셰이크 — UDP] │
     │◄══════════════════════════════► │
     │                                 │
-    │─── op:30 FLOOR_REQUEST ────────►│  PTT 누름
+    │─── op:30 FLOOR_REQUEST ────────►│  PTT 토글 ON
     │◄── op:110 FLOOR_GRANTED ────────│  발언권 허가 (본인)
     │◄── op:112 FLOOR_TAKEN ──────────│  발언 중 알림 (다른 멤버)
     │                                 │
     │─── op:32 FLOOR_PING ───────────►│  2초 주기 생존 신호
     │◄── op:116 FLOOR_PONG ───────────│  서버 응답
     │                                 │
-    │─── op:31 FLOOR_RELEASE ────────►│  PTT 놓음
+    │─── op:31 FLOOR_RELEASE ────────►│  PTT 토글 OFF
     │◄── op:113 FLOOR_IDLE ───────────│  채널 유휴 (전체)
     │                                 │
     │─── op:12 CHANNEL_LEAVE ────────►│
@@ -205,15 +313,39 @@ G: Floor Taken ──── FLOOR_RELEASE ────────────�
 
 ## 사전 생성 채널
 
-서버 시작 시 아래 5개 채널이 자동으로 생성됩니다.
+서버 시작 시 아래 3개 채널이 자동으로 생성됩니다.
 
 | channel_id | freq | name | 정원 |
 |---|---|---|---|
-| CH_0001 | 0001 | 🎯 작전지휘 | 10 |
-| CH_0112 | 0112 | 🔴 긴급대응 | 5 |
-| CH_0305 | 0305 | 🛡️ 경계근무 | 8 |
-| CH_0420 | 0420 | 🚁 항공지원 | 6 |
-| CH_0911 | 0911 | 📡 상황보고 | 20 |
+| CH_0001 | 0001 | 📢 영업/시연 | 20 |
+| CH_0002 | 0002 | 🤝 스스 파트너스 | 20 |
+| CH_0003 | 0003 | 🏠 동천 패밀리 | 20 |
+
+---
+
+## Admin REST API
+
+`lcadmin` CLI가 내부적으로 사용하는 HTTP 엔드포인트입니다. `curl` 등으로 직접 호출도 가능합니다.
+
+### 조회
+
+| Method | Path | 설명 |
+|---|---|---|
+| GET | `/admin/status` | 서버 상태 요약 |
+| GET | `/admin/users` | User 전체 목록 |
+| GET | `/admin/users/{user_id}` | User 상세 |
+| GET | `/admin/channels` | Channel 전체 목록 |
+| GET | `/admin/channels/{channel_id}` | Channel 상세 |
+| GET | `/admin/peers` | Endpoint 전체 목록 |
+| GET | `/admin/peers/{ufrag}` | Endpoint 상세 |
+| GET | `/channels` | 채널 목록 (일반) |
+| GET | `/channels/{id}` | 채널 상세 (일반) |
+
+### 조작
+
+| Method | Path | 설명 |
+|---|---|---|
+| POST | `/admin/floor-revoke/{channel_id}` | Floor 강제 Idle 복귀 |
 
 ---
 
@@ -249,6 +381,7 @@ cargo test --test integration_test
 | Floor Control (MBCP TS 24.380) | ✅ 완료 |
 | 좀비 세션/피어 자동 종료 | ✅ 완료 |
 | 사전 정의 채널 자동 생성 | ✅ 완료 |
+| 운영 관리 CLI (lcadmin) | ✅ 완료 |
 | STUN keepalive 핫패스 최적화 | ✅ 완료 |
 | net.rs SO_REUSEPORT + recvmmsg | 🔲 부하 테스트 후 적용 예정 |
 

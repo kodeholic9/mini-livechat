@@ -2,7 +2,7 @@
 name = "mini-livechat"
 version = "0.1.0"
 edition = "2021"
-# author: kodeholic (powered by Gemini)
+# author: kodeholic (powered by Claude)
 
 [dependencies]
 # 비동기 I/O 및 워커 스레드 관리
@@ -35,9 +35,20 @@ rustls-pki-types   = "1"
 async-trait = "0.1"
 rand        = "0.8"
 clap        = { version = "4", features = ["derive"] }
+reqwest     = { version = "0.12", features = ["json", "blocking"] }
+tabled      = "0.17"
+colored     = "2"
 hmac        = "0.12"
 sha-1       = "0.10"
 crc32fast   = "1"
+
+[[bin]]
+name = "lcserver"
+path = "src/main.rs"
+
+[[bin]]
+name = "lcadmin"
+path = "src/bin/admin.rs"
 
 [dev-dependencies]
 # 통합 테스트용 WS 클라이언트

@@ -46,6 +46,76 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.16.0] - 2026-02-28
+
+### 운영 관리 CLI (lcadmin) + PTT 토글 + 채널 개편
+
+#### Cargo.toml
+
+- `[[bin]] name = "lcserver"` / `[[bin]] name = "lcadmin"` 선언
+- `reqwest = "0.12"` (json, blocking feature) 추가 — lcadmin HTTP 클라이언트
+- `tabled = "0.17"` 추가 — 터미널 테이블 렌더링
+- `colored = "2"` 추가 — 터미널 컬러 출력
+
+#### src/bin/admin.rs (신규)
+
+- `lcadmin` 운영 관리 CLI 바이너리 신규 작성
+- `clap` subcommand 구조: `status` / `users` / `channels` / `peers` / `floor-revoke`
+- `--host` / `--port` 옵션으로 원격 서버 접속 지원
+- `tabled` + `colored` 기반 터미널 컬러 테이블 출력
+- `reqwest::blocking` HTTP 클라이언트 (동기, 별도 런타임 불필요)
+- `deser_opt_string` — `Option<String>` JSON 필드를 `"-"` 폴백 String으로 역직렬화
+
+#### src/http.rs
+
+- `HttpState`에 `start_time_ms: u64` 추가 — 서버 시작 시각, uptime 계산용
+- `HttpState::new()` 생성자 추가 — `SystemTime::now()` 기반 시작 시각 캡처
+- Admin 조회 엔드포인트 추가
+  - `GET /admin/status` — uptime, user/channel/peer 수, Floor 활성 채널 수
+  - `GET /admin/users` — User 전체 목록 (user_id, priority, idle_secs)
+  - `GET /admin/users/{user_id}` — User 상세 + 소속 채널 목록
+  - `GET /admin/channels` — Channel 전체 목록 (Floor 상태, holder, 대기열 수)
+  - `GET /admin/channels/{channel_id}` — Channel 상세 (대기열, peer 목록 포함)
+  - `GET /admin/peers` — Endpoint 전체 목록 (address, idle_secs, SRTP 상태)
+  - `GET /admin/peers/{ufrag}` — Endpoint 상세 (tracks 포함)
+- Admin 조작 엔드포인트 추가
+  - `POST /admin/floor-revoke/{channel_id}` — Floor 강제 Idle 복귀 (queue 포함 초기화)
+- 기존 `/channels`, `/channels/{id}` 라우터를 admin_router로 통합
+
+#### src/core.rs
+
+- `UserHub::all_users()` 추가 — 전체 User 목록 반환 (admin 조회용)
+- `UserHub::count()` 추가 — 현재 접속 User 수
+- `ChannelHub::count()` 추가 — 현재 채널 수
+- `ChannelHub::count_floor_taken()` 추가 — Floor Taken 상태 채널 수
+- `MediaPeerHub::get_by_ufrag()` 추가 — ufrag 기반 Endpoint 단건 조회
+- `MediaPeerHub::all_endpoints()` 추가 — 전체 Endpoint 목록 반환
+- `MediaPeerHub::count()` 추가 — 현재 Endpoint 수
+
+#### src/lib.rs
+
+- `pub mod http` 선언 추가
+- `HttpState::new()` 생성 및 admin 라우터 mount
+- 기존 `/channels` 라우터를 admin_router에 통합 (merge)
+- `routing::post` import 추가
+
+#### config.rs
+
+- 사전 생성 채널 5개 → 3개로 변경
+  - `CH_0001 / 0001 / 📢 영업/시연 / 20명`
+  - `CH_0002 / 0002 / 🤝 스스 파트너스 / 20명`
+  - `CH_0003 / 0003 / 🏠 동천 패밀리 / 20명`
+
+#### client/app.js
+
+- PTT 버튼 동작 방식 변경: Hold(누르는 동안) → Toggle(클릭 시 전환)
+  - `mousedown/mouseup/mouseleave` 이벤트 제거 → `onclick` 단일 이벤트
+  - `Space` keyup 제거 → keydown 단일 토글
+  - 모바일: `touchend` 제거 → `touchstart` 토글
+- 채널 목록 수신 시 `CH_0001` 기본 선택 (이전 선택 채널 유지 우선)
+
+---
+
 ## [0.15.0] - 2026-02-28
 
 ### Floor Ping 방향 역전 (서버→클라이언트 → 클라이언트→서버) + error_code 통합

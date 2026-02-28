@@ -3,11 +3,12 @@
 pub mod config;
 pub mod core;
 pub mod error;
+pub mod http;
 pub mod media;
 pub mod protocol;
 pub mod utils;
 
-use axum::{routing::get, Router};
+use axum::{routing::{get, post}, Router};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -15,6 +16,7 @@ use tracing::{error, info};
 use crate::core::{ChannelHub, MediaPeerHub, UserHub};
 use crate::media::{DtlsSessionMap, ServerCert};
 use crate::protocol::{ws_handler, AppState};
+use crate::http::HttpState;
 
 /// CLI에서 주입되는 런타임 설정
 /// - 기본값은 config.rs 상수
@@ -74,9 +76,29 @@ pub async fn run_server(args: ServerArgs) {
         Arc::clone(&dtls_session_map),
     ));
 
+    let http_state = HttpState::new(
+        Arc::clone(&user_hub),
+        Arc::clone(&channel_hub),
+        Arc::clone(&media_peer_hub),
+    );
+
+    let admin_router = Router::new()
+        .route("/admin/status",                 get(http::admin_status))
+        .route("/admin/users",                  get(http::admin_list_users))
+        .route("/admin/users/{user_id}",        get(http::admin_get_user))
+        .route("/admin/channels",               get(http::admin_list_channels))
+        .route("/admin/channels/{channel_id}",  get(http::admin_get_channel))
+        .route("/admin/peers",                  get(http::admin_list_peers))
+        .route("/admin/peers/{ufrag}",          get(http::admin_get_peer))
+        .route("/admin/floor-revoke/{channel_id}", post(http::admin_floor_revoke))
+        .route("/channels",      get(http::list_channels))
+        .route("/channels/{id}", get(http::get_channel))
+        .with_state(http_state);
+
     let app = Router::new()
         .route("/ws", get(ws_handler))
-        .with_state(app_state);
+        .with_state(app_state)
+        .merge(admin_router);
 
     let addr     = format!("0.0.0.0:{}", args.port);
     let listener = TcpListener::bind(&addr).await.unwrap();

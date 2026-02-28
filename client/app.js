@@ -223,8 +223,13 @@ function onChannelListAck(list) {
     opt.textContent = `${ch.freq}  ${ch.name}  [${ch.member_count}/${ch.capacity}]`;
     sel.appendChild(opt);
   });
-  // 이전 선택한 채널이 여전 목록에 있으면 유지
-  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+  // 이전 선택한 채널이 여전히 목록에 있으면 유지, 없으면 CH_0001 기본 선택
+  if (prev && [...sel.options].some((o) => o.value === prev)) {
+    sel.value = prev;
+  } else {
+    const defaultOpt = [...sel.options].find((o) => o.value === 'CH_0001');
+    if (defaultOpt) sel.value = 'CH_0001';
+  }
   log('sys', `CHANNEL_LIST 수신 (${(list || []).length}개)`, 'ok');
 }
 
@@ -751,30 +756,24 @@ $('btn-clear').onclick = () => {
   $('log-area').innerHTML = '';
 };
 
-// PTT 버튼 이벤트 처리
+// PTT 버튼 이벤트 처리 (토글 방식)
 const pttBtn = $('ptt-btn');
-pttBtn.onmousedown = () => pttStart();
-pttBtn.onmouseup = () => pttStop();
-pttBtn.onmouseleave = () => pttStop();
+pttBtn.onclick = () => {
+  if (state.pttActive) {
+    pttStop();
+  } else {
+    pttStart();
+  }
+};
 pttBtn.ontouchstart = (e) => {
   e.preventDefault();
-  pttStart();
-};
-pttBtn.ontouchend = (e) => {
-  e.preventDefault();
-  pttStop();
+  if (state.pttActive) pttStop(); else pttStart();
 };
 
 document.addEventListener('keydown', (e) => {
   if (e.code === 'Space' && !e.repeat && !e.target.matches('input')) {
     e.preventDefault();
-    pttStart();
-  }
-});
-document.addEventListener('keyup', (e) => {
-  if (e.code === 'Space') {
-    e.preventDefault();
-    pttStop();
+    if (state.pttActive) pttStop(); else pttStart();
   }
 });
 

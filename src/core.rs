@@ -85,6 +85,19 @@ impl UserHub {
         }
     }
 
+    /// 전체 User 목록 반환 (admin 조회용)
+    pub fn all_users(&self) -> Vec<(String, Arc<User>)> {
+        self.users.read().unwrap()
+            .iter()
+            .map(|(id, u)| (id.clone(), Arc::clone(u)))
+            .collect()
+    }
+
+    /// 현재 접속 User 수
+    pub fn count(&self) -> usize {
+        self.users.read().unwrap().len()
+    }
+
     /// 좀비 세션 목록 반환 (last_seen 기준)
     pub fn find_zombies(&self, timeout_ms: u64) -> Vec<String> {
         let now = current_timestamp();
@@ -319,6 +332,19 @@ impl ChannelHub {
     pub fn remove(&self, channel_id: &str) -> bool {
         self.channels.write().unwrap().remove(channel_id).is_some()
     }
+
+    /// 현재 채널 수
+    pub fn count(&self) -> usize {
+        self.channels.read().unwrap().len()
+    }
+
+    /// Floor Taken 상태인 채널 수
+    pub fn count_floor_taken(&self) -> usize {
+        self.channels.read().unwrap()
+            .values()
+            .filter(|ch| ch.floor.lock().unwrap().state == FloorControlState::Taken)
+            .count()
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -455,6 +481,21 @@ impl MediaPeerHub {
             }
             trace!("Endpoint removed: ufrag={}", ufrag);
         }
+    }
+
+    /// ufrag으로 엔드포인트 조회 (admin 상세 조회용)
+    pub fn get_by_ufrag(&self, ufrag: &str) -> Option<Arc<Endpoint>> {
+        self.by_ufrag.read().unwrap().get(ufrag).cloned()
+    }
+
+    /// 전체 Endpoint 목록 반환 (admin 조회용)
+    pub fn all_endpoints(&self) -> Vec<Arc<Endpoint>> {
+        self.by_ufrag.read().unwrap().values().cloned().collect()
+    }
+
+    /// 현재 Endpoint 수
+    pub fn count(&self) -> usize {
+        self.by_ufrag.read().unwrap().len()
     }
 
     /// 채널 내 모든 엔드포인트 반환 (릴레이 대상 목록)
