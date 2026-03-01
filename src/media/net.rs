@@ -252,17 +252,21 @@ async fn handle_srtp(
     hub:         &MediaPeerHub,
     channel_hub: &ChannelHub,
 ) {
+    let b1 = packet.get(1).copied().unwrap_or(0);
+    trace!("[srtp] enter addr={} len={} byte0=0x{:02x} byte1=0x{:02x}", src_addr, packet.len(), packet.first().unwrap_or(&0), b1);
+
     let ep = match hub.get_by_addr(&src_addr) {
         Some(e) => e,
         None    => { debug!("[srtp] unknown addr={}, dropping", src_addr); return; }
     };
 
+    trace!("[srtp] ep found user={} channel={} srtp_ready={}", ep.user_id, ep.channel_id, ep.inbound_srtp.lock().unwrap().is_ready());
+
     ep.touch();
 
     // RTCP 판별: byte1 >= 0xC8(200) 이면 SRTCP
-    // Chrome은 PTT 시작 시 첫 패킷으로 RTCP SR(byte1=0xC8)을 보냄
-    // decrypt_rtp 로 처리하면 auth tag 실패 → decrypt_rtcp 로 분기
-    let is_rtcp = packet.get(1).map(|&b| b >= 0xC8).unwrap_or(false);
+    let is_rtcp = b1 >= 0xC8;
+    trace!("[srtp] is_rtcp={} user={}", is_rtcp, ep.user_id);
 
     // MutexGuard를 블록으로 감싸서 await 진입 전에 반드시 drop
     // (std::sync::MutexGuard는 Send가 아니므로 tokio::spawn 안에서 await 넘지불가)
@@ -319,13 +323,19 @@ async fn relay_to_channel(
     // Idle 상태이거나 다른 사람이 holder이면 패킷 드롭
     if let Some(ch) = channel_hub.get(channel_id) {
         let floor = ch.floor.lock().unwrap();
-        let is_granted = floor.state == FloorControlState::Taken
+        let state        = &floor.state;
+        let taken_by     = floor.floor_taken_by.as_deref().unwrap_or("none");
+        let is_granted   = *state == FloorControlState::Taken
             && floor.floor_taken_by.as_deref() == Some(sender_user);
+        trace!("[relay] floor check user={} state={:?} taken_by={} granted={}", sender_user, state, taken_by, is_granted);
         drop(floor);
         if !is_granted {
             trace!("[relay] floor not granted for user={}, dropping", sender_user);
             return;
         }
+    } else {
+        trace!("[relay] channel not found channel_id={}", channel_id);
+        return;
     }
 
     let targets = hub.get_channel_endpoints(channel_id);
