@@ -8,6 +8,11 @@ All notable changes to this project will be documented in this file.
 
 ### 다음 과제
 
+- [ ] **[P0] 모바일 오디오 수신 불가 디버깅** — PC는 정상, 단말만 무음
+  - 서버 relay 정상 확인 (U6349로 패킷 전달 확인)
+  - 클라이언트 Audio 엘리먼트 상태 정상 (paused=false, volume=1, muted=false, track unmuted)
+  - SRTP is_rtcp 판별 버그 수정 (byte1 >= 0xC8 → pt & 0x7F 범위 판별) — 빌드 미확인
+  - **다음 확인 포인트**: net.rs RTCP 판별 수정 후 빌드/테스트, 여전히 안되면 Wireshark로 단말 수신 패킷 덤프
 - [ ] 멀티 원격 비디오 — 현재 remote-video 엘리먼트 1개, 다수 참여자 레이아웃 확장
 - [ ] E2E 비디오 테스트 (카메라 환경 필요)
 
