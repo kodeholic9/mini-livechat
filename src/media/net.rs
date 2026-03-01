@@ -285,7 +285,42 @@ async fn handle_srtp(
         }
         if is_rtcp {
             match ctx.decrypt_rtcp(packet) {
-                Ok(_)  => trace!("[srtcp] ok user={}", ep.user_id),
+                Ok(plain) => {
+                    // RTCP 헤더 파싱 (RFC 3550)
+                    // byte[0]: V(2)|P(1)|RC(5)
+                    // byte[1]: PT (200=SR, 201=RR, 202=SDES, 203=BYE, 204=APP)
+                    // byte[2..3]: length (32bit words - 1)
+                    // byte[4..7]: SSRC
+                    if plain.len() >= 8 {
+                        let rtcp_pt   = plain[1];
+                        let ssrc      = u32::from_be_bytes([plain[4], plain[5], plain[6], plain[7]]);
+                        let pt_name   = match rtcp_pt {
+                            200 => "SR",
+                            201 => "RR",
+                            202 => "SDES",
+                            203 => "BYE",
+                            204 => "APP",
+                            _   => "?",
+                        };
+                        // RR(201): fraction_lost, cumulative_lost 파싱
+                        if rtcp_pt == 201 && plain.len() >= 32 {
+                            // RR report block: offset 8
+                            // byte[8..11]:  SSRC of source
+                            // byte[12]:     fraction lost (0~255 = 0~100%)
+                            // byte[13..15]: cumulative lost (24bit)
+                            let src_ssrc    = u32::from_be_bytes([plain[8], plain[9], plain[10], plain[11]]);
+                            let frac_lost   = plain[12];
+                            let cum_lost    = u32::from_be_bytes([0, plain[13], plain[14], plain[15]]);
+                            let loss_pct    = frac_lost as f32 / 255.0 * 100.0;
+                            trace!("[srtcp] {} user={} ssrc={} src_ssrc={} loss={:.1}% cum_lost={}",
+                                pt_name, ep.user_id, ssrc, src_ssrc, loss_pct, cum_lost);
+                        } else {
+                            trace!("[srtcp] {} user={} ssrc={} len={}", pt_name, ep.user_id, ssrc, plain.len());
+                        }
+                    } else {
+                        trace!("[srtcp] ok user={} (short packet)", ep.user_id);
+                    }
+                }
                 Err(e) => trace!("[srtcp] decrypt failed user={}: {}", ep.user_id, e),
             }
             DecryptResult::Rtcp
