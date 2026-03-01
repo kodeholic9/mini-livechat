@@ -23,7 +23,17 @@ pub struct Args {
 #[tokio::main]
 async fn main() {
     // 환경 변수 기반 로깅 초기화 (RUST_LOG=trace 등으로 제어)
-    tracing_subscriber::fmt::init();
+    // 로컬 시각 타이머 — chrono::Local 기반
+    struct LocalTimer;
+    impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
+        fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+            write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"))
+        }
+    }
+    tracing_subscriber::fmt()
+        .with_timer(LocalTimer)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
 
     let args = Args::parse();
 

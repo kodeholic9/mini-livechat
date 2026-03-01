@@ -222,18 +222,14 @@ fn colorize_op_name(name: &str) -> String {
     }
 }
 
-/// Unix millis → "HH:MM:SS.mmm" (로컬 시각 근사 — UTC+9 오프셋 없이 UTC 표시)
+/// Unix millis → "HH:MM:SS.mmm" (로컬 시각)
 fn format_ts(ts_ms: u64) -> String {
-    let secs   = ts_ms / 1000;
-    let millis = ts_ms % 1000;
-
-    // 간단히 Unix epoch 기준 HH:MM:SS 계산
-    let total_secs_today = secs % 86400;
-    let hh = total_secs_today / 3600;
-    let mm = (total_secs_today % 3600) / 60;
-    let ss = total_secs_today % 60;
-
-    format!("{:02}:{:02}:{:02}.{:03}", hh, mm, ss, millis)
+    use chrono::{Local, TimeZone};
+    let secs   = (ts_ms / 1000) as i64;
+    let millis =  ts_ms % 1000;
+    let dt = Local.timestamp_opt(secs, 0).single()
+        .unwrap_or_else(|| Local::now());
+    format!("{}.{:03}", dt.format("%H:%M:%S"), millis)
 }
 
 fn truncate(s: &str, max: usize) -> String {

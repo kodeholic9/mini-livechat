@@ -87,10 +87,12 @@ pub async fn run_udp_relay(
         };
 
         let packet = buf[..len].to_vec();
+
+        // 길이가 0인 의미 없는(혹은 악의적인) 패킷 최우선 차단
+        if packet.is_empty() { continue; }
+
         let kind = classify(&packet);
         trace!("[media] {} bytes from {} kind={:?} byte0=0x{:02x}", len, src_addr, kind, packet[0]);
-
-        if packet.is_empty() { continue; }
 
         match kind {
             PacketKind::Stun => {
@@ -135,12 +137,12 @@ async fn handle_stun(
     socket:      Arc<UdpSocket>,
     packet:      &[u8],
     src_addr:    std::net::SocketAddr,
-    hub:         &MediaPeerHub,
+    peer_hub:    &MediaPeerHub,
     cert:        Arc<ServerCert>,
     session_map: Arc<DtlsSessionMap>,
 ) {
     // 핸패스: 이미 latch된 addr이면 write lock 없이 touch() + Response만
-    if let Some(ep) = hub.get_by_addr(&src_addr) {
+    if let Some(ep) = peer_hub.get_by_addr(&src_addr) {
         ep.touch();
         trace!("[stun] keepalive from known addr={} user={}", src_addr, ep.user_id);
         if let Some(resp) = make_binding_response(packet, src_addr, &ep.ice_pwd) {
@@ -157,7 +159,7 @@ async fn handle_stun(
         None    => { debug!("[stun] no USERNAME, dropping"); return; }
     };
 
-    let ep = match hub.latch(&ufrag, src_addr) {
+    let ep = match peer_hub.latch(&ufrag, src_addr) {
         Some(ep) => { trace!("[stun] latched ufrag={} user={} addr={}", ufrag, ep.user_id, src_addr); ep }
         None     => { debug!("[stun] unknown ufrag={}, dropping", ufrag); return; }
     };
@@ -205,7 +207,7 @@ async fn handle_dtls(
     socket:      Arc<UdpSocket>,
     packet:      Vec<u8>,
     src_addr:    std::net::SocketAddr,
-    hub:         &MediaPeerHub,
+    peer_hub:    &MediaPeerHub,
     cert:        Arc<ServerCert>,
     session_map: Arc<DtlsSessionMap>,
 ) {
@@ -216,7 +218,7 @@ async fn handle_dtls(
     }
 
     // 2. 신규 세션 — Endpoint가 latch 돼 있어야 함
-    let endpoint = match hub.get_by_addr(&src_addr) {
+    let endpoint = match peer_hub.get_by_addr(&src_addr) {
         Some(ep) => ep,
         None     => {
             // STUN latch 전에 DTLS가 먼저 도착한 경우 — pending 큐에 저장
@@ -249,13 +251,13 @@ async fn handle_srtp(
     socket:      &UdpSocket,
     packet:      &[u8],
     src_addr:    std::net::SocketAddr,
-    hub:         &MediaPeerHub,
+    peer_hub:    &MediaPeerHub,
     channel_hub: &ChannelHub,
 ) {
     let b1 = packet.get(1).copied().unwrap_or(0);
     trace!("[srtp] enter addr={} len={} byte0=0x{:02x} byte1=0x{:02x}", src_addr, packet.len(), packet.first().unwrap_or(&0), b1);
 
-    let ep = match hub.get_by_addr(&src_addr) {
+    let ep = match peer_hub.get_by_addr(&src_addr) {
         Some(e) => e,
         None    => { debug!("[srtp] unknown addr={}, dropping", src_addr); return; }
     };
@@ -343,7 +345,7 @@ async fn handle_srtp(
         DecryptResult::Rtp(p) => p,
     };
 
-    relay_to_channel(socket, &plaintext, &ep.user_id, &ep.ufrag, &ep.channel_id, hub, channel_hub).await;
+    relay_to_channel(socket, &plaintext, &ep.user_id, &ep.ufrag, &ep.channel_id, peer_hub, channel_hub).await;
 }
 
 // ----------------------------------------------------------------------------
@@ -356,7 +358,7 @@ async fn relay_to_channel(
     sender_user:  &str,
     sender_ufrag: &str,
     channel_id:   &str,
-    hub:          &MediaPeerHub,
+    peer_hub:     &MediaPeerHub,
     channel_hub:  &ChannelHub,
 ) {
     // Floor Control 체크: sender가 현재 floor holder여야만 릴레이
@@ -378,7 +380,7 @@ async fn relay_to_channel(
         return;
     }
 
-    let targets = hub.get_channel_endpoints(channel_id);
+    let targets = peer_hub.get_channel_endpoints(channel_id);
 
     for target in targets {
         if target.ufrag == sender_ufrag { continue; } // 자기 자신 제외
