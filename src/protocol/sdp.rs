@@ -104,9 +104,7 @@ pub fn build_sdp_answer(offer: &str, fingerprint: &str, udp_port_arg: u16) -> (S
         sdp.push_str(&format!("a=ice-ufrag:{}\r\n", server_ufrag));
         sdp.push_str(&format!("a=ice-pwd:{}\r\n", server_pwd));
         sdp.push_str(&format!("a=fingerprint:{}\r\n", fingerprint));
-        // actpass: 브라우저가 active/passive 역할을 자율 결정
-        // passive 고정 시 Android Chrome에서 keying material 방향이 반대로 해석되는 버그 있음
-        sdp.push_str("a=setup:actpass\r\n");
+        sdp.push_str("a=setup:passive\r\n");
         sdp.push_str("a=rtcp-mux\r\n");
         sdp.push_str("a=rtcp-rsize\r\n");
         // sendrecv: recvonly 시 일부 브라우저가 DTLS를 시작하지 않는 문제 방지
@@ -240,10 +238,10 @@ mod tests {
     }
 
     #[test]
-    fn answer_has_actpass_setup() {
+    fn answer_has_passive_setup() {
         let offer = make_audio_offer("cu");
         let (sdp, _, _) = build_sdp_answer(&offer, "sha-256 FF:00", 40000);
-        assert!(sdp.contains("a=setup:actpass"));
+        assert!(sdp.contains("a=setup:passive"));
     }
 
     #[test]
