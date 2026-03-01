@@ -264,8 +264,13 @@ async fn handle_srtp(
 
     ep.touch();
 
-    // RTCP 판별: byte1 >= 0xC8(200) 이면 SRTCP
-    let is_rtcp = b1 >= 0xC8;
+    // RTCP 판별 (RFC 5761)
+    // byte1 = M(1bit) | PT(7bit)
+    // PT 200~207 → RTCP (SR/RR/SDES/BYE/APP/...)
+    // PT 0~127   → RTP
+    // 주의: byte1 >= 0xC8 판별은 잘못됨 — RTP PT가 72~79(0xC8~0xCF)면 오판
+    let pt = b1 & 0x7F;
+    let is_rtcp = pt >= 72 && pt <= 79;  // RFC 5761 §4: RTCP PT range 200-207 = 0x48-0x4F (masked)
     trace!("[srtp] is_rtcp={} user={}", is_rtcp, ep.user_id);
 
     // MutexGuard를 블록으로 감싸서 await 진입 전에 반드시 drop
