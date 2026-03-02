@@ -666,10 +666,17 @@ async fn handle_renegotiate(
 
     // 기존 Endpoint의 ICE credential 조회 (re-negotiation에서는 ICE restart 방지)
     let current_ufrag = session.current_ufrag.as_deref().unwrap_or("");
+    trace!("[renego] looking up endpoint: current_ufrag='{}'", current_ufrag);
     let existing_ep = state.media_peer_hub.get_by_ufrag(current_ufrag);
     let (existing_ufrag, existing_pwd) = match &existing_ep {
-        Some(ep) => (ep.ufrag.as_str(), ep.ice_pwd.as_str()),
-        None     => ("", ""),
+        Some(ep) => {
+            trace!("[renego] found endpoint: ufrag='{}' ice_pwd='{}'", ep.ufrag, ep.ice_pwd);
+            (ep.ufrag.as_str(), ep.ice_pwd.as_str())
+        }
+        None     => {
+            trace!("[renego] WARNING: endpoint NOT found for ufrag='{}', using empty credentials", current_ufrag);
+            ("", "")
+        }
     };
 
     let ssrc_map: Vec<SsrcMapping> = payload.mid_map.iter().filter_map(|entry| {
