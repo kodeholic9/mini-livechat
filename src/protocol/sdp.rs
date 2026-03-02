@@ -22,9 +22,21 @@
 /// BUNDLE 구조이므로 audio/video 모두 같은 ICE/DTLS/포트를 공유한다.
 /// offer에 m=video가 있으면 동일 패턴으로 미러링 — 서버 코드 변경 불필요.
 pub fn build_sdp_answer(offer: &str, fingerprint: &str, udp_port_arg: u16) -> (String, String, String) {
+    build_sdp_answer_with_ice(offer, fingerprint, udp_port_arg, None, None)
+}
+
+/// SDP answer 조립 — ICE credential을 외부에서 주입 가능
+/// override_ufrag/pwd가 Some이면 그 값을 사용, None이면 랜덤 생성
+pub fn build_sdp_answer_with_ice(
+    offer: &str,
+    fingerprint: &str,
+    udp_port_arg: u16,
+    override_ufrag: Option<&str>,
+    override_pwd:   Option<&str>,
+) -> (String, String, String) {
     let session_id   = crate::utils::current_timestamp();
-    let server_ufrag = random_ice_string(16);
-    let server_pwd   = random_ice_string(22);
+    let server_ufrag = override_ufrag.map(|s| s.to_string()).unwrap_or_else(|| random_ice_string(16));
+    let server_pwd   = override_pwd.map(|s| s.to_string()).unwrap_or_else(|| random_ice_string(22));
     let local_ip     = crate::protocol::get_advertise_ip();
     let udp_port     = udp_port_arg;
 
@@ -164,19 +176,15 @@ pub fn build_sdp_answer_for_renego(
     existing_pwd:   &str,   // 초기 join 시 생성된 pwd
     ssrc_map:       &[SsrcMapping],
 ) -> String {
-    // 기본 answer 생성 후 ufrag/pwd를 기존 값으로 교체
-    let (mut sdp, new_ufrag, new_pwd) = build_sdp_answer(offer, fingerprint, udp_port);
-
-    // re-negotiation에서는 새 ufrag/pwd가 아닌 기존 ICE credential을 사용해야 함
-    // 새 ufrag를 넣으면 브라우저가 ICE restart로 인식해서 demux 실패
-    sdp = sdp.replace(
-        &format!("a=ice-ufrag:{}", new_ufrag),
-        &format!("a=ice-ufrag:{}", existing_ufrag),
+    // 기존 ICE credential을 직접 주입해서 answer 생성 — replace 해킹 없이 깨끗하게
+    let (mut sdp, _ufrag, _pwd) = build_sdp_answer_with_ice(
+        offer,
+        fingerprint,
+        udp_port,
+        Some(existing_ufrag),
+        Some(existing_pwd),
     );
-    sdp = sdp.replace(
-        &format!("a=ice-pwd:{}", new_pwd),
-        &format!("a=ice-pwd:{}", existing_pwd),
-    );
+    tracing::trace!("[sdp-renego] answer built with existing_ufrag='{}'", existing_ufrag);
 
     // sendonly m-line에 a=ssrc: 라인 삽입
     // 전략: a=end-of-candidates 라인 직전에 mid에 해당하는 ssrc 라인 삽입
@@ -582,6 +590,29 @@ mod tests {
         let sdp = build_sdp_answer_for_renego(&offer, "sha-256 FF:00", 40000, "myUfrag123", "myPwd456", &[]);
         assert!(sdp.contains("a=ice-ufrag:myUfrag123"), "should use existing ufrag");
         assert!(sdp.contains("a=ice-pwd:myPwd456"), "should use existing pwd");
+        // 랜덤 ufrag가 섹여 들어가면 안 됨
+        assert!(!sdp.contains("a=ice-ufrag:myUfrag123\r\na=ice-ufrag:"),
+            "should not have duplicate ufrag lines");
+    }
+
+    #[test]
+    fn build_with_ice_override() {
+        let offer = make_audio_offer("cu");
+        let (sdp, ufrag, pwd) = build_sdp_answer_with_ice(
+            &offer, "sha-256 FF:00", 40000, Some("FIXED_UFRAG"), Some("FIXED_PWD"));
+        assert_eq!(ufrag, "FIXED_UFRAG");
+        assert_eq!(pwd, "FIXED_PWD");
+        assert!(sdp.contains("a=ice-ufrag:FIXED_UFRAG"));
+        assert!(sdp.contains("a=ice-pwd:FIXED_PWD"));
+    }
+
+    #[test]
+    fn build_with_ice_none_generates_random() {
+        let offer = make_audio_offer("cu");
+        let (sdp1, u1, _) = build_sdp_answer_with_ice(&offer, "sha-256 FF:00", 40000, None, None);
+        let (_sdp2, u2, _) = build_sdp_answer_with_ice(&offer, "sha-256 FF:00", 40000, None, None);
+        assert_ne!(u1, u2, "None should generate random ufrag each time");
+        assert!(sdp1.contains(&format!("a=ice-ufrag:{}", u1)));
     }
 
     // ----- detect_local_ip -----
