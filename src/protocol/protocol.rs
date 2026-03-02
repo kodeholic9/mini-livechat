@@ -248,14 +248,19 @@ async fn handle_channel_join(
     // 3. SDP answer 생성 (offer가 있을 때만)
     // server_ufrag: 서버가 생성한 ICE ufrag → MediaPeerHub 등록 키
     // STUN USERNAME = "server_ufrag:client_ufrag" 구조이므로 서버 ufrag로 조회해야 함
+    let is_conference = channel.mode == ChannelMode::Conference;
     let (sdp_answer, ep_ufrag, ep_pwd) = match payload.sdp_offer.as_deref() {
         Some(offer) => {
             // offer의 a=setup 값 확인용 로그 (DTLS 역할 디버그)
             let offer_setup = offer.lines()
                 .find(|l| l.starts_with("a=setup:"))
                 .unwrap_or("a=setup:(없음)");
-            trace!("[sdp] offer a=setup: {}", offer_setup);
-            let (sdp, server_ufrag, server_pwd) = build_sdp_answer(offer, &state.server_cert.fingerprint, state.udp_port);
+            trace!("[sdp] offer a=setup: {} conference={}", offer_setup, is_conference);
+            // Conference: sendrecv→recvonly 강제 (BUNDLE PT 충돌 방지)
+            let (sdp, server_ufrag, server_pwd) = crate::protocol::sdp::build_sdp_answer_with_ice(
+                offer, &state.server_cert.fingerprint, state.udp_port,
+                None, None, is_conference,
+            );
             trace!("[sdp] answer built ufrag={} (offer_setup={})", server_ufrag, offer_setup);
             (Some(sdp), server_ufrag, server_pwd)
         }
@@ -719,7 +724,7 @@ async fn handle_renegotiate(
 }
 
 // SDP answer 생성은 protocol/sdp.rs 로 분리됨
-use crate::protocol::sdp::build_sdp_answer;
+// handle_channel_join에서 build_sdp_answer_with_ice 직접 호출 (conference_mode 파라미터 전달)
 
 // ----------------------------------------------------------------------------
 // [Trace 유틸]

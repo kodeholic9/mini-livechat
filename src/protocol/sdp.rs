@@ -22,17 +22,21 @@
 /// BUNDLE 구조이므로 audio/video 모두 같은 ICE/DTLS/포트를 공유한다.
 /// offer에 m=video가 있으면 동일 패턴으로 미러링 — 서버 코드 변경 불필요.
 pub fn build_sdp_answer(offer: &str, fingerprint: &str, udp_port_arg: u16) -> (String, String, String) {
-    build_sdp_answer_with_ice(offer, fingerprint, udp_port_arg, None, None)
+    build_sdp_answer_with_ice(offer, fingerprint, udp_port_arg, None, None, false)
 }
 
 /// SDP answer 조립 — ICE credential을 외부에서 주입 가능
 /// override_ufrag/pwd가 Some이면 그 값을 사용, None이면 랜덤 생성
+/// conference_mode: true이면 offer의 sendrecv를 recvonly로 반전
+///   → 클라이언트 업링크 전용 (sendonly), 서버는 수신만 (recvonly)
+///   → BUNDLE 내 PT 충돌 방지 (sendrecv의 수신 PT와 sendonly의 송신 PT 충돌 차단)
 pub fn build_sdp_answer_with_ice(
     offer: &str,
     fingerprint: &str,
     udp_port_arg: u16,
     override_ufrag: Option<&str>,
     override_pwd:   Option<&str>,
+    conference_mode: bool,
 ) -> (String, String, String) {
     let session_id   = crate::utils::current_timestamp();
     let server_ufrag = override_ufrag.map(|s| s.to_string()).unwrap_or_else(|| random_ice_string(16));
@@ -163,7 +167,13 @@ pub fn build_sdp_answer_with_ice(
             "recvonly" => "sendonly",
             "sendonly" => "recvonly",
             "inactive" => "inactive",
-            _          => "sendrecv",  // sendrecv 또는 기본값
+            _ => {
+                // sendrecv 또는 기본값
+                // Conference: sendrecv → recvonly (서버는 수신만, 클라이언트는 sendonly 전환)
+                //   → BUNDLE 내에서 이 m-line이 같은 PT로 수신하지 않으므로 demux 충돌 없음
+                // PTT: sendrecv → sendrecv (기존 동작 유지)
+                if conference_mode { "recvonly" } else { "sendrecv" }
+            }
         };
         sdp.push_str(&format!("a={}\r\n", answer_dir));
 
@@ -282,12 +292,14 @@ pub fn build_sdp_answer_for_renego(
     ssrc_map:       &[SsrcMapping],
 ) -> String {
     // 기존 ICE credential을 직접 주입해서 answer 생성 — replace 해킹 없이 깨끗하게
+    // re-negotiation은 항상 Conference 모드에서만 발생 (sendrecv→recvonly 강제)
     let (mut sdp, _ufrag, _pwd) = build_sdp_answer_with_ice(
         offer,
         fingerprint,
         udp_port,
         Some(existing_ufrag),
         Some(existing_pwd),
+        true,  // conference_mode
     );
     tracing::trace!("[sdp-renego] answer built with existing_ufrag='{}'", existing_ufrag);
 
@@ -704,7 +716,7 @@ mod tests {
     fn build_with_ice_override() {
         let offer = make_audio_offer("cu");
         let (sdp, ufrag, pwd) = build_sdp_answer_with_ice(
-            &offer, "sha-256 FF:00", 40000, Some("FIXED_UFRAG"), Some("FIXED_PWD"));
+            &offer, "sha-256 FF:00", 40000, Some("FIXED_UFRAG"), Some("FIXED_PWD"), false);
         assert_eq!(ufrag, "FIXED_UFRAG");
         assert_eq!(pwd, "FIXED_PWD");
         assert!(sdp.contains("a=ice-ufrag:FIXED_UFRAG"));
@@ -714,8 +726,8 @@ mod tests {
     #[test]
     fn build_with_ice_none_generates_random() {
         let offer = make_audio_offer("cu");
-        let (sdp1, u1, _) = build_sdp_answer_with_ice(&offer, "sha-256 FF:00", 40000, None, None);
-        let (_sdp2, u2, _) = build_sdp_answer_with_ice(&offer, "sha-256 FF:00", 40000, None, None);
+        let (sdp1, u1, _) = build_sdp_answer_with_ice(&offer, "sha-256 FF:00", 40000, None, None, false);
+        let (_sdp2, u2, _) = build_sdp_answer_with_ice(&offer, "sha-256 FF:00", 40000, None, None, false);
         assert_ne!(u1, u2, "None should generate random ufrag each time");
         assert!(sdp1.contains(&format!("a=ice-ufrag:{}", u1)));
     }

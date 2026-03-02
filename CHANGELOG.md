@@ -85,6 +85,25 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.20.7] - 2026-03-03
+
+### Conference SDP direction 고정 — BUNDLE PT 충돌(demux 에러) 해결
+
+#### 문제
+
+- Chrome 에러: `Failed to set up audio demuxing for mid='2'`
+- 원인: 초기 JOIN answer의 mid:0이 `sendrecv`(PT 111 수신 가능) + re-nego의 mid:2가 `sendonly`(PT 111 송신) → BUNDLE 내 PT 충돌
+
+#### 해결
+
+- `build_sdp_answer_with_ice()`에 `conference_mode: bool` 파라미터 추가
+- Conference: offer의 `sendrecv` → answer `recvonly` (서버 수신만, 클라이언트 sendonly 전환)
+- PTT: 기존 `sendrecv` → `sendrecv` 동작 유지
+- `handle_channel_join()`에서 `channel.mode`에 따라 `conference_mode` 전달
+- `build_sdp_answer_for_renego()`는 항상 `conference_mode: true`
+
+---
+
 ## [0.20.6] - 2026-03-03
 
 ### Conference SSRC Rewrite 기반 구축 — consumer SSRC 생성/매핑/relay rewrite
