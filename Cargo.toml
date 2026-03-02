@@ -6,7 +6,7 @@ edition = "2021"
 
 [dependencies]
 # 비동기 I/O 및 워커 스레드 관리
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
 # Zero-copy 기반 패킷 복사 오버헤드 최소화
 bytes = "1"
 

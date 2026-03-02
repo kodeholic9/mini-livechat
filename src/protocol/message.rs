@@ -31,6 +31,7 @@ pub struct ChannelCreatePayload {
     pub channel_id:   String,
     pub freq:         String,   // 주파수번호 4자리
     pub channel_name: String,
+    pub mode:         Option<String>,  // "ptt" | "conference" (없으면 기본 ptt)
 }
 
 /// op: CHANNEL_JOIN (11)
@@ -131,6 +132,7 @@ pub struct ChannelSummary {
     pub channel_id:   String,
     pub freq:         String,
     pub name:         String,
+    pub mode:         String,
     pub member_count: usize,
     pub capacity:     usize,
     pub created_at:   u64,
@@ -142,6 +144,7 @@ pub struct ChannelInfoData {
     pub channel_id:   String,
     pub freq:         String,
     pub name:         String,
+    pub mode:         String,
     pub member_count: usize,
     pub capacity:     usize,
     pub created_at:   u64,

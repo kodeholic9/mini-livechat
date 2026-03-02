@@ -34,6 +34,12 @@ All notable changes to this project will be documented in this file.
 - [ ] Preemption (Emergency) 시나리오
 - [ ] Disconnect Revoke 시나리오
 
+### tokio features 최적화
+
+- [ ] `features = ["full"]` → 실제 사용 feature만 명시 (빌드 시간 단축)
+  - 필요 feature: `rt-multi-thread`, `macros`, `net`, `sync`, `time`, `io-util`
+  - 제거 가능: `signal`, `process`, `fs` 등 미사용 feature
+
 ### net.rs 성능 개선 (메모리에 있음)
 
 - [ ] `try_recv_from` mut 수정 선행
@@ -43,12 +49,75 @@ All notable changes to this project will be documented in this file.
 - [ ] `SO_REUSEPORT` + `recvmmsg` 적용
 - [ ] 부하 테스트 후 병목 확인 후 적용
 
+### Conference 모드 추가 (SFU 다자통화)
+
+- [x] Step 1: Channel에 mode 필드 추가 (0.20.4)
+- [x] Step 2: relay_to_channel()에서 mode별 분기 (0.20.4)
+- [ ] Step 3: 클라이언트 SDK 다중 오디오 트랙 수신
+- [ ] Step 4: SSRC 충돌 감지/처리
+- [ ] Step 5: RTCP 포워딩 (Conference 품질 피드백)
+
 ### SRTP 릴레이 (Phase 1)
 
 - [ ] DTLS keying material → `SrtpContext` 키 설치 (0.8.0 구현 확인 필요)
 - [ ] 복호화된 RTP → 채널 내 다른 피어 relay
 - [ ] Floor Taken 상태일 때만 릴레이 (holder → others)
 - [ ] Floor Idle 상태에서 수신된 RTP는 drop 또는 버퍼
+
+---
+
+## [0.20.4] - 2026-03-02
+
+### Conference 모드 지원 — Step 1: ChannelMode 추가
+
+PTT(무전) 외에 Conference(다자통화 SFU) 모드를 채널 단위로 선택 가능하도록 기반 구조 추가.
+
+#### core/channel.rs
+
+- `ChannelMode` enum 신규: `PTT` | `Conference` (serde rename_all lowercase)
+- `ChannelMode::from_str_lossy()` — 문자열 변환, 알 수 없는 값이면 기본값 PTT
+- `Channel` 구조체에 `mode: ChannelMode` 필드 추가
+- `Channel::is_ptt()` 헬퍼 추가
+- `ChannelHub::create()` 시그니처에 `mode` 파라미터 추가
+- 테스트 3개 추가: `create_conference_channel`, `channel_mode_from_str_lossy`, `channel_mode_default_is_ptt`
+
+#### core.rs
+
+- re-export에 `ChannelMode` 추가
+
+#### protocol/message.rs
+
+- `ChannelCreatePayload`에 `mode: Option<String>` 추가 (하위 호환: 없으면 기본 ptt)
+- `ChannelSummary`, `ChannelInfoData`에 `mode: String` 필드 추가
+
+#### protocol/protocol.rs
+
+- `handle_channel_create()` — payload.mode 파싱 후 `ChannelMode::from_str_lossy()` 변환
+- `handle_channel_list()`, `handle_channel_info()` 응답에 mode 반영
+- ACK 응답에 `mode` 필드 포함
+
+#### config.rs
+
+- `PRESET_CHANNELS` 튜플에 mode 필드 추가: `(&str, &str, &str, &str, usize)`
+- 기존 3개 채널 모두 `"ptt"` 모드로 설정
+
+#### lib.rs
+
+- 사전 정의 채널 생성 루프에서 mode 파싱 및 전달
+
+#### http/dto.rs
+
+- `ChannelSummary`, `ChannelDetail`, `AdminChannelSummary`, `AdminChannelDetail`에 `mode: String` 필드 추가
+
+#### http/channel.rs, http/admin.rs
+
+- 모든 채널 조회 응답에 `mode` 반영
+
+#### media/net.rs
+
+- `relay_to_channel()` — 모드별 릴레이 게이트 분기
+  - PTT: 기존 Floor Control 체크 유지 (holder만 릴레이)
+  - Conference: floor check 스킵, 모든 발신자 통과
 
 ---
 

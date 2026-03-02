@@ -8,6 +8,6 @@ pub mod user;
 
 // re-export: 기존 `use crate::core::*` 코드가 그대로 동작하도록
 pub use user::{BroadcastTx, User, UserHub};
-pub use channel::{Channel, ChannelHub};
+pub use channel::{Channel, ChannelHub, ChannelMode};
 pub use floor::{FloorControl, FloorControlState, FloorIndicator, FloorQueueEntry};
 pub use media_peer::{Endpoint, MediaPeer, MediaPeerHub, Track, TrackKind};

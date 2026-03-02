@@ -361,20 +361,24 @@ async fn relay_to_channel(
     peer_hub:     &MediaPeerHub,
     channel_hub:  &ChannelHub,
 ) {
-    // Floor Control 체크: sender가 현재 floor holder여야만 릴레이
-    // Idle 상태이거나 다른 사람이 holder이면 패킷 드롭
+    // 모드별 릴레이 게이트
+    //   PTT:        Floor holder만 릴레이 (Idle 또는 다른 holder면 drop)
+    //   Conference:  모든 발신자 통과 (Floor Control 미적용)
     if let Some(ch) = channel_hub.get(channel_id) {
-        let floor = ch.floor.lock().unwrap();
-        let state        = &floor.state;
-        let taken_by     = floor.floor_taken_by.as_deref().unwrap_or("none");
-        let is_granted   = *state == FloorControlState::Taken
-            && floor.floor_taken_by.as_deref() == Some(sender_user);
-        trace!("[relay] floor check user={} state={:?} taken_by={} granted={}", sender_user, state, taken_by, is_granted);
-        drop(floor);
-        if !is_granted {
-            trace!("[relay] floor not granted for user={}, dropping", sender_user);
-            return;
+        if ch.is_ptt() {
+            let floor = ch.floor.lock().unwrap();
+            let state        = &floor.state;
+            let taken_by     = floor.floor_taken_by.as_deref().unwrap_or("none");
+            let is_granted   = *state == FloorControlState::Taken
+                && floor.floor_taken_by.as_deref() == Some(sender_user);
+            trace!("[relay] floor check user={} state={:?} taken_by={} granted={}", sender_user, state, taken_by, is_granted);
+            drop(floor);
+            if !is_granted {
+                trace!("[relay] floor not granted for user={}, dropping", sender_user);
+                return;
+            }
         }
+        // Conference 모드: floor check 없이 통과
     } else {
         trace!("[relay] channel not found channel_id={}", channel_id);
         return;

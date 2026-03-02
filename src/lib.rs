@@ -37,9 +37,10 @@ pub async fn run_server(args: ServerArgs) {
     let media_peer_hub = Arc::new(MediaPeerHub::new());
 
     // 사전 정의 채널 생성
-    for (channel_id, freq, name, capacity) in config::PRESET_CHANNELS {
-        channel_hub.create(channel_id, freq, name, *capacity);
-        info!("[channel] preset created: {} freq={} name={} cap={}", channel_id, freq, name, capacity);
+    for (channel_id, freq, name, mode_str, capacity) in config::PRESET_CHANNELS {
+        let mode = crate::core::ChannelMode::from_str_lossy(mode_str);
+        channel_hub.create(channel_id, freq, name, mode, *capacity);
+        info!("[channel] preset created: {} freq={} name={} mode={} cap={}", channel_id, freq, name, mode, capacity);
     }
 
     // DTLS 자체서명 인증서 — 프로세스 시작 시 1회 생성, 전체 공유

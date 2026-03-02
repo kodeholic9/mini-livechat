@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tracing::{error, trace, warn};
 
 use crate::config;
-use crate::core::{ChannelHub, MediaPeerHub, UserHub};
+use crate::core::{ChannelHub, ChannelMode, MediaPeerHub, UserHub};
 use crate::error::LiveError;
 use crate::trace::{TraceDir, TraceEvent, TraceHub};
 use crate::protocol::{
@@ -204,12 +204,16 @@ async fn handle_channel_create(
     packet: GatewayPacket,
 ) -> Result<(), LiveError> {
     let payload = parse_payload::<ChannelCreatePayload>(packet.d)?;
-    trace!("CHANNEL_CREATE - channel_id: {}", payload.channel_id);
+    let mode = payload.mode.as_deref()
+        .map(ChannelMode::from_str_lossy)
+        .unwrap_or_default();
+    trace!("CHANNEL_CREATE - channel_id: {} mode: {}", payload.channel_id, mode);
 
     state.channel_hub.create(
         &payload.channel_id,
         &payload.freq,
         &payload.channel_name,
+        mode,
         config::MAX_PEERS_PER_CHANNEL,
     );
 
@@ -219,6 +223,7 @@ async fn handle_channel_create(
             "channel_id":   payload.channel_id,
             "freq":         payload.freq,
             "channel_name": payload.channel_name,
+            "mode":         mode.to_string(),
         }),
     })).await
 }
@@ -431,6 +436,7 @@ async fn handle_channel_list(
                 channel_id:   ch.channel_id.clone(),
                 freq:         ch.freq.clone(),
                 name:         ch.name.clone(),
+                mode:         ch.mode.to_string(),
                 member_count: ch.member_count(),
                 capacity:     ch.capacity,
                 created_at:   ch.created_at,
@@ -470,6 +476,7 @@ async fn handle_channel_info(
             channel_id:   channel.channel_id.clone(),
             freq:         channel.freq.clone(),
             name:         channel.name.clone(),
+            mode:         channel.mode.to_string(),
             member_count: channel.member_count(),
             capacity:     channel.capacity,
             created_at:   channel.created_at,
