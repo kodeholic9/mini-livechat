@@ -97,6 +97,7 @@ pub struct AckPayload {
 #[derive(Serialize, Debug)]
 pub struct ChannelJoinAckData {
     pub channel_id:     String,
+    pub mode:           String,
     pub sdp_answer:     Option<String>,
     pub active_members: Vec<MemberInfo>,
 }

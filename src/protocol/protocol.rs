@@ -274,6 +274,7 @@ async fn handle_channel_join(
         op:   client::CHANNEL_JOIN,
         data: serde_json::to_value(ChannelJoinAckData {
             channel_id:     payload.channel_id.clone(),
+            mode:           channel.mode.to_string(),
             sdp_answer,
             active_members,
         }).unwrap_or_default(),

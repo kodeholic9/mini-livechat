@@ -66,6 +66,21 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.20.5] - 2026-03-02
+
+### Conference 모드 지원 — CHANNEL_JOIN ACK에 mode 필드 추가
+
+#### protocol/message.rs
+
+- `ChannelJoinAckData`에 `mode: String` 필드 추가
+
+#### protocol/protocol.rs
+
+- `handle_channel_join()` ACK 응답에 `channel.mode.to_string()` 전달
+  - SDK가 JOIN 응답에서 채널 모드를 인지할 수 있도록 함
+
+---
+
 ## [0.20.4] - 2026-03-02
 
 ### Conference 모드 지원 — Step 1: ChannelMode 추가
