@@ -44,11 +44,15 @@ pub fn build_sdp_answer_with_ice(
     // a=ssrc, a=ssrc-group: SFU는 offer의 클라이언트 SSRC를 echo하면 안 됨
     //   → Chrome BUNDLE demux 시 SSRC→mid 바인딩 충돌 유발 (RFC 8843 §9.2)
     //   → sendonly m-line의 서버 SSRC는 build_sdp_answer_for_renego()에서 별도 삽입
+    // a=msid: SFU는 클라이언트의 msid를 echo하면 안 됨
+    //   → sendonly m-line에는 서버 자체 msid를 별도 삽입
+    //   → sendrecv m-line의 msid도 제거 (SFU는 트랙 식별에 msid 불필요)
     let skip_prefixes = [
         "a=ice-", "a=fingerprint", "a=setup", "a=candidate",
         "a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive",
         "a=rtcp-mux", "a=rtcp-rsize", "c=",
         "a=ssrc", "a=ssrc-group",
+        "a=msid",  // msid + msid-semantic 둘 다 차단
     ];
 
     // --------------------------------------------------------------------
@@ -61,6 +65,7 @@ pub fn build_sdp_answer_with_ice(
         mid:            String,       // BUNDLE 그룹용
         direction:      String,       // offer의 방향: sendrecv|recvonly|sendonly|inactive
         has_rtcp_rsize: bool,         // offer에 a=rtcp-rsize가 있었는지 (없으면 answer에서도 생략)
+        media_type:     String,       // "audio" 또는 "video" — sendonly PT 필터링용
     }
 
     let mut sections: Vec<MediaSection> = Vec::new();
@@ -79,12 +84,17 @@ pub fn build_sdp_answer_with_ice(
             } else {
                 line.to_string()
             };
+            // m=audio ... 또는 m=video ... 에서 미디어 타입 추출
+            let media_type = if line.starts_with("m=audio") { "audio" }
+                             else if line.starts_with("m=video") { "video" }
+                             else { "unknown" };
             current = Some(MediaSection {
                 m_line,
                 codec_lines: Vec::new(),
                 mid: String::new(),
                 direction: "sendrecv".to_string(),  // 기본값 (offer에 명시 없으면 sendrecv)
                 has_rtcp_rsize: false,
+                media_type: media_type.to_string(),
             });
             continue;
         }
@@ -156,9 +166,92 @@ pub fn build_sdp_answer_with_ice(
             _          => "sendrecv",  // sendrecv 또는 기본값
         };
         sdp.push_str(&format!("a={}\r\n", answer_dir));
-        for line in &sec.codec_lines {
-            sdp.push_str(line);
-            sdp.push_str("\r\n");
+
+        // sendonly m-line: 서버가 송신할 코덱만 남기기 (PT 모호성 → Chrome demux 에러 방지)
+        //   audio: Opus(PT 111)만 — a=rtpmap:111, a=fmtp:111, a=rtcp-fb:111
+        //   video: 첫 번째 코덱(보통 VP8 PT 96)과 그 RTX만
+        // sendonly m-line: 서버 자체 msid 삽입 (클라이언트 msid는 skip_prefixes로 제거됨)
+        if answer_dir == "sendonly" {
+            sdp.push_str(&format!("a=msid:server-{0} server-{0}-track\r\n", sec.mid));
+        }
+
+        if answer_dir == "sendonly" {
+            // --- sendonly: 서버 송신 코덱만 필터 ---
+            let allowed_pts: Vec<&str> = if sec.media_type == "audio" {
+                vec!["111"]  // Opus만
+            } else {
+                // video: 첫 번째 코덱 PT + 그 RTX PT 추출
+                // m= 라인에서 PT list 파싱: "m=video PORT PROTO PT1 PT2 ..."
+                let m_parts: Vec<&str> = sec.m_line.split_whitespace().collect();
+                if m_parts.len() > 3 {
+                    // 첫 번째 코덱 PT (보통 96)
+                    let first_pt = m_parts[3];
+                    // RTX PT 찾기: codec_lines에서 a=fmtp:XX apt=first_pt인 XX
+                    let mut pts = vec![first_pt];
+                    for cl in &sec.codec_lines {
+                        if cl.starts_with("a=fmtp:") {
+                            // a=fmtp:97 apt=96;usedtx=1  →  PT=97이 96의 RTX
+                            let apt_needle = format!("apt={}", first_pt);
+                            if cl.contains(&apt_needle) {
+                                if let Some(pt_str) = cl.strip_prefix("a=fmtp:").and_then(|s| s.split_whitespace().next()) {
+                                    pts.push(pt_str);
+                                }
+                            }
+                        }
+                    }
+                    pts
+                } else {
+                    vec![]  // 파싱 실패 시 전부 유지 (fallback)
+                }
+            };
+
+            // m= 라인의 PT list도 필터링된 PT만 남기기
+            if !allowed_pts.is_empty() {
+                // m=audio PORT PROTO PT1 PT2 ... → m=audio PORT PROTO filtered_PTs
+                let m_parts: Vec<&str> = sec.m_line.splitn(4, ' ').collect();
+                if m_parts.len() == 4 {
+                    let orig_pts: Vec<&str> = m_parts[3].split_whitespace().collect();
+                    let filtered_pts: Vec<&str> = orig_pts.iter()
+                        .filter(|pt| allowed_pts.contains(pt))
+                        .copied()
+                        .collect();
+                    if !filtered_pts.is_empty() {
+                        // 이미 출력된 m= 라인을 교체 — 마지막 m= 라인을 찾아서 덮어쓰기
+                        let new_m_line = format!("{} {} {} {}",
+                            m_parts[0], m_parts[1], m_parts[2], filtered_pts.join(" "));
+                        // SDP에서 이미 push한 m= 라인을 교체
+                        if let Some(pos) = sdp.rfind(&sec.m_line) {
+                            let end = pos + sec.m_line.len();
+                            sdp.replace_range(pos..end, &new_m_line);
+                        }
+                    }
+                }
+            }
+
+            // codec 라인 필터: allowed_pts에 해당하는 것만
+            for line in &sec.codec_lines {
+                // a=rtpmap:PT, a=fmtp:PT, a=rtcp-fb:PT 형태 체크
+                let dominated_by_pt = line.starts_with("a=rtpmap:")
+                    || line.starts_with("a=fmtp:")
+                    || line.starts_with("a=rtcp-fb:");
+                if dominated_by_pt {
+                    // PT 번호 추출: "a=rtpmap:111 opus/48000/2" → "111"
+                    let pt = line.split(':').nth(1)
+                        .and_then(|s| s.split_whitespace().next())
+                        .unwrap_or("");
+                    if !allowed_pts.is_empty() && !allowed_pts.contains(&pt) {
+                        continue;  // 불필요한 코덱 제거
+                    }
+                }
+                sdp.push_str(line);
+                sdp.push_str("\r\n");
+            }
+        } else {
+            // --- sendrecv / recvonly / inactive: 기존대로 전부 출력 ---
+            for line in &sec.codec_lines {
+                sdp.push_str(line);
+                sdp.push_str("\r\n");
+            }
         }
         // ICE Lite — host candidate 1개
         sdp.push_str(&format!(
@@ -625,6 +718,161 @@ mod tests {
         let (_sdp2, u2, _) = build_sdp_answer_with_ice(&offer, "sha-256 FF:00", 40000, None, None);
         assert_ne!(u1, u2, "None should generate random ufrag each time");
         assert!(sdp1.contains(&format!("a=ice-ufrag:{}", u1)));
+    }
+
+    // ----- sendonly PT 필터링 + msid 테스트 -----
+
+    fn make_renego_offer_full_codecs() -> String {
+        // 실제 Chrome offer와 유사: audio PT 다수 + video PT 다수 + recvonly m-line
+        "v=0\r\n\
+         o=- 123 2 IN IP4 0.0.0.0\r\n\
+         s=-\r\n\
+         t=0 0\r\n\
+         a=group:BUNDLE 0 1 2\r\n\
+         a=msid-semantic: WMS client-stream-id\r\n\
+         m=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126\r\n\
+         c=IN IP4 0.0.0.0\r\n\
+         a=mid:0\r\n\
+         a=ice-ufrag:cu\r\n\
+         a=ice-pwd:cp\r\n\
+         a=setup:actpass\r\n\
+         a=sendrecv\r\n\
+         a=msid:client-stream-id client-audio-track\r\n\
+         a=rtcp-mux\r\n\
+         a=rtpmap:111 opus/48000/2\r\n\
+         a=rtcp-fb:111 transport-cc\r\n\
+         a=fmtp:111 minptime=10;usedtx=1;useinbandfec=1\r\n\
+         a=rtpmap:63 red/48000/2\r\n\
+         a=fmtp:63 111/111;usedtx=1\r\n\
+         a=rtpmap:9 G722/8000\r\n\
+         a=rtpmap:0 PCMU/8000\r\n\
+         a=rtpmap:8 PCMA/8000\r\n\
+         a=rtpmap:13 CN/8000\r\n\
+         a=rtpmap:110 telephone-event/48000\r\n\
+         a=rtpmap:126 telephone-event/8000\r\n\
+         a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+         m=video 9 UDP/TLS/RTP/SAVPF 96 97 102 103\r\n\
+         c=IN IP4 0.0.0.0\r\n\
+         a=mid:1\r\n\
+         a=ice-ufrag:cu\r\n\
+         a=ice-pwd:cp\r\n\
+         a=setup:actpass\r\n\
+         a=sendrecv\r\n\
+         a=msid:client-stream-id client-video-track\r\n\
+         a=rtcp-mux\r\n\
+         a=rtcp-rsize\r\n\
+         a=rtpmap:96 VP8/90000\r\n\
+         a=rtcp-fb:96 transport-cc\r\n\
+         a=rtpmap:97 rtx/90000\r\n\
+         a=fmtp:97 apt=96;usedtx=1\r\n\
+         a=rtpmap:102 H264/90000\r\n\
+         a=rtcp-fb:102 transport-cc\r\n\
+         a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n\
+         a=rtpmap:103 rtx/90000\r\n\
+         a=fmtp:103 apt=102;usedtx=1\r\n\
+         a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+         m=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126\r\n\
+         c=IN IP4 0.0.0.0\r\n\
+         a=mid:2\r\n\
+         a=ice-ufrag:cu\r\n\
+         a=ice-pwd:cp\r\n\
+         a=setup:actpass\r\n\
+         a=recvonly\r\n\
+         a=rtcp-mux\r\n\
+         a=rtpmap:111 opus/48000/2\r\n\
+         a=rtcp-fb:111 transport-cc\r\n\
+         a=fmtp:111 minptime=10;usedtx=1;useinbandfec=1\r\n\
+         a=rtpmap:63 red/48000/2\r\n\
+         a=fmtp:63 111/111;usedtx=1\r\n\
+         a=rtpmap:9 G722/8000\r\n\
+         a=rtpmap:0 PCMU/8000\r\n\
+         a=rtpmap:8 PCMA/8000\r\n\
+         a=rtpmap:13 CN/8000\r\n\
+         a=rtpmap:110 telephone-event/48000\r\n\
+         a=rtpmap:126 telephone-event/8000\r\n\
+         a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n"
+            .to_string()
+    }
+
+    #[test]
+    fn sendonly_audio_filters_to_opus_only() {
+        let offer = make_renego_offer_full_codecs();
+        let (sdp, _, _) = build_sdp_answer(&offer, "sha-256 FF:00", 40000);
+        // mid:2 (recvonly→sendonly) audio: PT 111만 남아야 함
+        // sendonly 섹션의 m= 라인에서 PT list 확인
+        let lines: Vec<&str> = sdp.lines().collect();
+        let mut in_mid2 = false;
+        for line in &lines {
+            if line.starts_with("a=mid:2") { in_mid2 = true; }
+            if in_mid2 && line.starts_with("m=audio") {
+                // 이미 지나갔으므로 이전 m= 라인 기준
+            }
+            // mid:2 섹션에서 G722, PCMU 등이 없어야 함
+            if in_mid2 && line.starts_with("a=rtpmap:9 ") {
+                panic!("mid:2 sendonly should not contain G722 (PT 9)");
+            }
+            if in_mid2 && line.starts_with("a=rtpmap:0 ") {
+                panic!("mid:2 sendonly should not contain PCMU (PT 0)");
+            }
+        }
+        // Opus는 있어야 함
+        assert!(sdp.contains("a=rtpmap:111 opus/48000/2"), "opus should be in sendonly");
+    }
+
+    #[test]
+    fn sendonly_m_line_pt_list_filtered() {
+        let offer = make_renego_offer_full_codecs();
+        let (sdp, _, _) = build_sdp_answer(&offer, "sha-256 FF:00", 40000);
+        // sendonly audio m-line은 PT 111만 있어야 함
+        // m=audio PORT PROTO 111  (not 111 63 9 0 8 13 110 126)
+        let lines: Vec<&str> = sdp.lines().collect();
+        let mut found_sendonly_m = false;
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains("a=sendonly") {
+                // 이 섹션의 m= 라인 찾기 (위로 올라가기)
+                for j in (0..i).rev() {
+                    if lines[j].starts_with("m=audio") {
+                        // PT list에 111만 있는지 확인
+                        assert!(!lines[j].contains(" 63 "), "sendonly m-line should not have PT 63");
+                        assert!(!lines[j].contains(" 9 "), "sendonly m-line should not have PT 9");
+                        found_sendonly_m = true;
+                        break;
+                    }
+                    if lines[j].starts_with("m=") { break; }  // 다른 미디어 섹션
+                }
+            }
+        }
+        assert!(found_sendonly_m, "should have found sendonly audio m-line");
+    }
+
+    #[test]
+    fn sendonly_has_server_msid() {
+        let offer = make_renego_offer_full_codecs();
+        let (sdp, _, _) = build_sdp_answer(&offer, "sha-256 FF:00", 40000);
+        // sendonly mid:2에 서버 msid가 있어야 함
+        assert!(sdp.contains("a=msid:server-2 server-2-track"),
+            "sendonly should have server msid");
+    }
+
+    #[test]
+    fn client_msid_not_echoed() {
+        let offer = make_renego_offer_full_codecs();
+        let (sdp, _, _) = build_sdp_answer(&offer, "sha-256 FF:00", 40000);
+        // 클라이언트 msid가 answer에 없어야 함
+        assert!(!sdp.contains("client-stream-id"), "client msid should not be echoed");
+        assert!(!sdp.contains("client-audio-track"), "client msid should not be echoed");
+        assert!(!sdp.contains("a=msid-semantic"), "msid-semantic should not be echoed");
+    }
+
+    #[test]
+    fn sendrecv_has_no_msid() {
+        let offer = make_renego_offer_full_codecs();
+        let (sdp, _, _) = build_sdp_answer(&offer, "sha-256 FF:00", 40000);
+        // sendrecv 섹션에는 msid가 없어야 함 (skip됨)
+        // server msid는 sendonly에만 삽입
+        let msid_count = sdp.matches("a=msid:").count();
+        // sendonly가 1개 (mid:2)이므로 msid도 1개
+        assert_eq!(msid_count, 1, "only sendonly section should have msid");
     }
 
     // ----- detect_local_ip -----
