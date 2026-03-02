@@ -19,7 +19,8 @@ use crate::protocol::{
         AckPayload, ChannelCreatePayload, ChannelDeletePayload, ChannelEventPayload,
         ChannelInfoData, ChannelJoinAckData, ChannelJoinPayload, ChannelLeavePayload,
         ChannelSummary, ChannelUpdatePayload, ErrorPayload, GatewayPacket, HelloPayload,
-        IdentifyPayload, MemberInfo, MessageCreatePayload, MessageEventPayload, ReadyPayload,
+        IdentifyPayload, MemberInfo, MessageCreatePayload, MessageEventPayload,
+        PeerMediaInfo, ReadyPayload, RenegotiatePayload, RenegotiateAckPayload, TrackInfo,
     },
     opcode::{client, server},
 };
@@ -147,6 +148,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             client::FLOOR_REQUEST  => floor::handle_floor_request(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.user_hub, &state.channel_hub, &state.trace_hub, packet).await,
             client::FLOOR_RELEASE  => floor::handle_floor_release(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.user_hub, &state.channel_hub, &state.trace_hub, packet).await,
             client::FLOOR_PING     => floor::handle_floor_ping(&broadcast_tx, session.user_id.as_deref().unwrap(), &state.channel_hub, packet).await,
+            client::RENEGOTIATE    => handle_renegotiate(&broadcast_tx, &session, &state, packet).await,
             unknown => {
                 warn!("알 수 없는 opcode: {}", unknown);
                 send(&broadcast_tx, error_packet(LiveError::InvalidOpcode(unknown))).await
@@ -281,13 +283,39 @@ async fn handle_channel_join(
     })).await?;
 
     // 5. 채널 내 다른 멤버들에게 입장 이벤트 브로드캐스트 (본인 제외)
-    let members   = channel.get_members();
-    let event_json = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
+    let members = channel.get_members();
+
+    // 5a. join 이벤트 (UI 멤버 목록 갱신용)
+    let join_event = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
         event:      "join".to_string(),
         channel_id: payload.channel_id.clone(),
-        member:     MemberInfo { user_id: user_id.clone(), ssrc: payload.ssrc },
+        data:       serde_json::to_value(MemberInfo {
+            user_id: user_id.clone(), ssrc: payload.ssrc,
+        }).unwrap_or_default(),
     });
-    state.user_hub.broadcast_to(&members, &event_json, Some(&user_id)).await;
+    state.user_hub.broadcast_to(&members, &join_event, Some(&user_id)).await;
+
+    // 5b. peer_added 이벤트 (re-negotiation 트리거 — 미디어 트랙 정보 포함)
+    let tracks: Vec<TrackInfo> = ep.tracks.read().unwrap()
+        .iter()
+        .map(|t| TrackInfo {
+            kind: match t.kind {
+                crate::core::TrackKind::Audio => "audio".to_string(),
+                crate::core::TrackKind::Video => "video".to_string(),
+                crate::core::TrackKind::Data  => "data".to_string(),
+            },
+            ssrc: t.ssrc,
+        })
+        .collect();
+    let peer_added_event = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
+        event:      "peer_added".to_string(),
+        channel_id: payload.channel_id.clone(),
+        data:       serde_json::to_value(PeerMediaInfo {
+            user_id: user_id.clone(),
+            tracks,
+        }).unwrap_or_default(),
+    });
+    state.user_hub.broadcast_to(&members, &peer_added_event, Some(&user_id)).await;
 
     // 6. Floor Taken 상태라면 신규 입장자에게 FLOOR_TAKEN 전송
     //    MutexGuard가 await를 걸치면 Send 불만족 → 동기 블록에서 패킷 문자열만 추출,
@@ -343,13 +371,26 @@ async fn handle_channel_leave(
 
     // 1. 퇴장 이벤트 브로드캐스트 (remove 전에)
     if let Some(channel) = state.channel_hub.get(&payload.channel_id) {
-        let members    = channel.get_members();
-        let event_json = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
+        let members = channel.get_members();
+
+        // 1a. leave 이벤트 (UI 멤버 목록 갱신용)
+        let leave_event = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
             event:      "leave".to_string(),
             channel_id: payload.channel_id.clone(),
-            member:     MemberInfo { user_id: user_id.clone(), ssrc },
+            data:       serde_json::to_value(MemberInfo {
+                user_id: user_id.clone(), ssrc,
+            }).unwrap_or_default(),
         });
-        state.user_hub.broadcast_to(&members, &event_json, Some(&user_id)).await;
+        state.user_hub.broadcast_to(&members, &leave_event, Some(&user_id)).await;
+
+        // 1b. peer_removed 이벤트 (re-negotiation 트리거)
+        let peer_removed_event = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
+            event:      "peer_removed".to_string(),
+            channel_id: payload.channel_id.clone(),
+            data:       serde_json::json!({ "user_id": user_id }),
+        });
+        state.user_hub.broadcast_to(&members, &peer_removed_event, Some(&user_id)).await;
+
         channel.remove_member(&user_id);
     }
 
@@ -383,7 +424,7 @@ async fn handle_channel_update(
     let event_json = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
         event:      "update".to_string(),
         channel_id: payload.channel_id.clone(),
-        member:     MemberInfo { user_id: "system".to_string(), ssrc: 0 },
+        data:       serde_json::json!({ "user_id": "system", "ssrc": 0 }),
     });
     state.user_hub.broadcast_to(&members, &event_json, None).await;
 
@@ -409,7 +450,7 @@ async fn handle_channel_delete(
         let event_json = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
             event:      "delete".to_string(),
             channel_id: payload.channel_id.clone(),
-            member:     MemberInfo { user_id: "system".to_string(), ssrc: 0 },
+            data:       serde_json::json!({ "user_id": "system", "ssrc": 0 }),
         });
         state.user_hub.broadcast_to(&members, &event_json, None).await;
     }
@@ -571,6 +612,61 @@ fn collect_members(channel_id: &str, state: &AppState) -> Vec<MemberInfo> {
         .collect()
 }
 
+// ----------------------------------------------------------------------------
+// [RENEGOTIATE] Unified Plan SDP 재협상 — Step 1 스텀
+// Step 3에서 동적 SDP answer 생성 로직 구현 예정
+// ----------------------------------------------------------------------------
+
+async fn handle_renegotiate(
+    tx:      &mpsc::Sender<String>,
+    session: &Session,
+    state:   &AppState,
+    packet:  GatewayPacket,
+) -> Result<(), LiveError> {
+    let payload = parse_payload::<RenegotiatePayload>(packet.d)?;
+    let user_id = session.user_id.as_ref().unwrap().clone();
+    trace!("RENEGOTIATE - user:{} channel:{} mid_map_len={}",
+        user_id, payload.channel_id, payload.mid_map.len());
+
+    // 채널 존재 검증
+    let _channel = state.channel_hub.get(&payload.channel_id)
+        .ok_or_else(|| LiveError::ChannelNotFound(payload.channel_id.clone()))?;
+
+    // mid_map → SsrcMapping 변환
+    // 각 mid에 대응하는 peer의 SSRC를 MediaPeerHub에서 조회
+    use crate::protocol::sdp::{build_sdp_answer_for_renego, SsrcMapping};
+
+    let ssrc_map: Vec<SsrcMapping> = payload.mid_map.iter().filter_map(|entry| {
+        // entry.user_id의 Endpoint에서 해당 kind의 SSRC 조회
+        let endpoints = state.media_peer_hub.get_channel_endpoints(&payload.channel_id);
+        let peer_ep = endpoints.iter().find(|ep| ep.user_id == entry.user_id)?;
+        let tracks = peer_ep.tracks.read().unwrap();
+        let target_kind = match entry.kind.as_str() {
+            "audio" => crate::core::TrackKind::Audio,
+            "video" => crate::core::TrackKind::Video,
+            _       => return None,
+        };
+        let ssrc = tracks.iter()
+            .find(|t| t.kind == target_kind)
+            .map(|t| t.ssrc)?;
+        trace!("[renego] mid={} -> user={} kind={} ssrc={}",
+            entry.mid, entry.user_id, entry.kind, ssrc);
+        Some(SsrcMapping { mid: entry.mid.clone(), ssrc })
+    }).collect();
+
+    let (sdp_answer, _new_ufrag, _new_pwd) = build_sdp_answer_for_renego(
+        &payload.sdp_offer,
+        &state.server_cert.fingerprint,
+        state.udp_port,
+        &ssrc_map,
+    );
+
+    send(tx, make_packet(server::RENEGOTIATE_ACK, RenegotiateAckPayload {
+        channel_id:  payload.channel_id,
+        sdp_answer,
+    })).await
+}
+
 // SDP answer 생성은 protocol/sdp.rs 로 분리됨
 use crate::protocol::sdp::build_sdp_answer;
 
@@ -612,6 +708,7 @@ fn op_meta_in(op: u8, user_id: Option<&str>) -> (&'static str, String) {
         client::FLOOR_REQUEST  => ("FLOOR_REQUEST",  format!("user={}", uid)),
         client::FLOOR_RELEASE  => ("FLOOR_RELEASE",  format!("user={}", uid)),
         client::FLOOR_PING     => ("FLOOR_PING",     format!("user={}", uid)),
+        client::RENEGOTIATE    => ("RENEGOTIATE",    format!("user={}", uid)),
         _                      => ("UNKNOWN",         format!("op={} user={}", op, uid)),
     }
 }
@@ -631,13 +728,26 @@ async fn cleanup(session: &mut Session, state: &AppState) {
         trace!("cleanup - user:{} channel:{} ufrag:{}", user_id, channel_id, ufrag);
 
         if let Some(channel) = state.channel_hub.get(&channel_id) {
-            let members    = channel.get_members();
-            let event_json = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
+            let members = channel.get_members();
+
+            // leave 이벤트 (UI 멤버 목록 갱신용)
+            let leave_event = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
                 event:      "leave".to_string(),
                 channel_id: channel_id.clone(),
-                member:     MemberInfo { user_id: user_id.clone(), ssrc },
+                data:       serde_json::to_value(MemberInfo {
+                    user_id: user_id.clone(), ssrc,
+                }).unwrap_or_default(),
             });
-            state.user_hub.broadcast_to(&members, &event_json, Some(&user_id)).await;
+            state.user_hub.broadcast_to(&members, &leave_event, Some(&user_id)).await;
+
+            // peer_removed 이벤트 (re-negotiation 트리거)
+            let peer_removed_event = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
+                event:      "peer_removed".to_string(),
+                channel_id: channel_id.clone(),
+                data:       serde_json::json!({ "user_id": user_id }),
+            });
+            state.user_hub.broadcast_to(&members, &peer_removed_event, Some(&user_id)).await;
+
             channel.remove_member(&user_id);
         }
 

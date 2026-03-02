@@ -53,9 +53,28 @@ All notable changes to this project will be documented in this file.
 
 - [x] Step 1: Channel에 mode 필드 추가 (0.20.4)
 - [x] Step 2: relay_to_channel()에서 mode별 분기 (0.20.4)
-- [ ] Step 3: 클라이언트 SDK 다중 오디오 트랙 수신
-- [ ] Step 4: SSRC 충돌 감지/처리
-- [ ] Step 5: RTCP 포워딩 (Conference 품질 피드백)
+- [x] Step 3: CHANNEL_JOIN ACK에 mode 필드 추가 (0.20.5)
+- [x] Step 4: SDK Conference 모드 지원 (v0.4.0~0.4.1)
+  - _channelMode 상태, isConference getter
+  - DTLS connected 시 Conference 자동 unmute
+  - requestFloor/releaseFloor Conference noop
+  - getChannelInfo() + channel:info 이벤트
+  - switchCamera() 전면/후면 전환 (PTT/Conference 공통)
+- [x] Step 5: Conference UI (Google Meet 스타일 그리드)
+  - PTT/Conference 하단 컨트롤 바 통일
+  - 입퇴장 시 CHANNEL_INFO 재조회로 그리드 갱신
+  - 카메라 1개 이하 시 전환 버튼 disable
+
+- [ ] **[P0] Unified Plan SDP 재협상 (N:N 비디오 핵심)**
+  - 현재 문제: 1:1 PeerConnection 구조라 상대 비디오 SSRC가 SDP에 없어 브라우저가 drop
+  - 방식: Unified Plan + addTransceiver per peer + re-offer/answer (mediasoup/Jitsi 방식)
+  - 프로토콜: RENEGOTIATE opcode 추가 (C→S: re-offer, S→C: re-answer)
+  - 서버: 동적 SDP answer 생성 (peer별 recvonly m-line + SSRC 매핑)
+  - SDK: peer 입퇴장 시 addTransceiver + createOffer + re-negotiation
+  - 릴레이: 발신자 SSRC → 수신자 m-line 매핑
+  - 부장님 설계 수정사항 반영 필요 (새 대화에서 진행)
+- [ ] SSRC 충돌 감지/처리
+- [ ] RTCP 포워딩 (Conference 품질 피드백)
 
 ### SRTP 릴레이 (Phase 1)
 

@@ -103,11 +103,16 @@ pub struct ChannelJoinAckData {
 }
 
 /// op: CHANNEL_EVENT (100)
+/// event별 data 구조가 다르므로 Value 기반 유연한 구조 사용
+///   - "join" / "leave":     { user_id, ssrc }
+///   - "peer_added":         { user_id, tracks: [{kind, ssrc}] }
+///   - "peer_removed":       { user_id }
+///   - "update" / "delete":  { user_id, ssrc } (system 이벤트)
 #[derive(Serialize, Debug)]
 pub struct ChannelEventPayload {
     pub event:      String,
     pub channel_id: String,
-    pub member:     MemberInfo,
+    pub data:       serde_json::Value,
 }
 
 /// op: MESSAGE_EVENT (101)
@@ -260,4 +265,51 @@ pub struct FloorQueuePosInfoPayload {
 #[derive(Serialize, Debug)]
 pub struct FloorPongPayload {
     pub channel_id: String,
+}
+
+// ----------------------------------------------------------------------------
+// [Renegotiation] Unified Plan SDP 재협상
+// ----------------------------------------------------------------------------
+
+/// op: RENEGOTIATE (17) — C→S, SDP re-offer 전송
+#[derive(Deserialize, Debug)]
+pub struct RenegotiatePayload {
+    pub channel_id: String,
+    pub sdp_offer:  String,
+    /// recvonly m-line ↔ peer 매핑 (서버가 SSRC 삽입용으로 사용)
+    #[serde(default)]
+    pub mid_map:    Vec<MidMapEntry>,
+}
+
+/// mid ↔ peer 매핑 엔트리
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MidMapEntry {
+    pub mid:     String,     // SDP m-line 식별자 ("2", "3" 등)
+    pub user_id: String,     // 수신할 peer의 user_id
+    pub kind:    String,     // "audio" | "video"
+}
+
+/// op: RENEGOTIATE_ACK (117) — S→C, SDP re-answer 응답
+#[derive(Serialize, Debug)]
+pub struct RenegotiateAckPayload {
+    pub channel_id:  String,
+    pub sdp_answer:  String,
+}
+
+// ----------------------------------------------------------------------------
+// [공통] Peer 미디어 정보 (peer_added 이벤트, re-negotiation용)
+// ----------------------------------------------------------------------------
+
+/// 트랙 단위 미디어 정보
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TrackInfo {
+    pub kind: String,   // "audio" | "video"
+    pub ssrc: u32,
+}
+
+/// peer 단위 미디어 정보
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PeerMediaInfo {
+    pub user_id: String,
+    pub tracks:  Vec<TrackInfo>,
 }

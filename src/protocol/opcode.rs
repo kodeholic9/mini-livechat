@@ -32,6 +32,9 @@ pub mod client {
     pub const FLOOR_RELEASE: u8 = 31;
     /// Floor Ping — 클라이언트가 holder 생존 신호 전송 (GRANTED 후 2초 주기)
     pub const FLOOR_PING:    u8 = 32;
+
+    /// SDP re-offer 전송 (Unified Plan 재협상)
+    pub const RENEGOTIATE:   u8 = 17;
 }
 
 /// Server → Client opcodes
@@ -68,4 +71,7 @@ pub mod server {
     pub const FLOOR_QUEUE_POS_INFO: u8 = 115;
     /// 서버 → holder Floor Ping 응답 (Pong)
     pub const FLOOR_PONG:           u8 = 116;
+
+    /// SDP re-answer 응답 (Unified Plan 재협상)
+    pub const RENEGOTIATE_ACK:      u8 = 117;
 }
