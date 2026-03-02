@@ -13,12 +13,13 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, trace};
+use rand::Rng;
 
 use crate::media::srtp::SrtpContext;
 use crate::utils::current_timestamp;
 
 /// BUNDLE 트랙 종류
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum TrackKind {
     Audio,
     Video,
@@ -90,17 +91,34 @@ impl Endpoint {
     }
 }
 
+/// Consumer SSRC 매핑 키: (receiver_user_id, sender_user_id, kind)
+/// 서버가 relay 시 원본 SSRC를 이 값으로 rewrite
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct ConsumerSsrcKey {
+    pub receiver: String,
+    pub sender:   String,
+    pub kind:     TrackKind,
+}
+
 pub struct MediaPeerHub {
     by_addr:  RwLock<HashMap<SocketAddr, Arc<Endpoint>>>,
     by_ufrag: RwLock<HashMap<String, Arc<Endpoint>>>,
+    /// Conference consumer SSRC 매핑
+    /// key: (receiver, sender, kind) → value: 서버가 생성한 consumer SSRC
+    consumer_ssrc: RwLock<HashMap<ConsumerSsrcKey, u32>>,
+    /// 역방향 조회: sender_ssrc → Vec<(receiver_user_id, consumer_ssrc)>
+    /// relay 핫패스에서 O(1) 조회용
+    ssrc_relay_map: RwLock<HashMap<u32, Vec<(String, u32)>>>,
 }
 
 impl MediaPeerHub {
     pub fn new() -> Self {
         trace!("Initializing MediaPeerHub");
         Self {
-            by_addr:  RwLock::new(HashMap::new()),
-            by_ufrag: RwLock::new(HashMap::new()),
+            by_addr:        RwLock::new(HashMap::new()),
+            by_ufrag:        RwLock::new(HashMap::new()),
+            consumer_ssrc:   RwLock::new(HashMap::new()),
+            ssrc_relay_map:  RwLock::new(HashMap::new()),
         }
     }
 
@@ -164,6 +182,70 @@ impl MediaPeerHub {
             .filter(|ep| ep.channel_id == channel_id)
             .cloned()
             .collect()
+    }
+
+    /// Conference consumer SSRC 할당 또는 기존 값 반환
+    /// receiver가 sender의 kind 트랙을 수신할 때 사용할 SSRC
+    pub fn get_or_create_consumer_ssrc(
+        &self,
+        receiver: &str,
+        sender:   &str,
+        kind:     TrackKind,
+    ) -> u32 {
+        let key = ConsumerSsrcKey {
+            receiver: receiver.to_string(),
+            sender:   sender.to_string(),
+            kind:     kind.clone(),
+        };
+        // 기존 값이 있으면 반환
+        if let Some(&ssrc) = self.consumer_ssrc.read().unwrap().get(&key) {
+            return ssrc;
+        }
+        // 새로 생성
+        let ssrc = rand::thread_rng().gen::<u32>() | 1;  // 0 방지
+        self.consumer_ssrc.write().unwrap().insert(key, ssrc);
+        trace!("consumer SSRC created: {}→{} {:?} ssrc={}", sender, receiver, kind, ssrc);
+        ssrc
+    }
+
+    /// relay 핫패스용 역방향 맵 재구축
+    /// sender의 원본 SSRC → Vec<(receiver_user_id, consumer_ssrc)>
+    pub fn rebuild_relay_map(&self, channel_id: &str) {
+        let mut relay_map = self.ssrc_relay_map.write().unwrap();
+        relay_map.clear();
+        let consumer_map = self.consumer_ssrc.read().unwrap();
+        let endpoints = self.by_ufrag.read().unwrap();
+        // 채널 내 endpoint들의 원본 SSRC 수집
+        for ep in endpoints.values().filter(|e| e.channel_id == channel_id) {
+            let tracks = ep.tracks.read().unwrap();
+            for track in tracks.iter() {
+                let sender_user = &ep.user_id;
+                // 이 sender_ssrc를 수신하는 모든 consumer 찾기
+                for (key, &consumer_ssrc) in consumer_map.iter() {
+                    if key.sender == *sender_user && key.kind == track.kind {
+                        relay_map.entry(track.ssrc)
+                            .or_insert_with(Vec::new)
+                            .push((key.receiver.clone(), consumer_ssrc));
+                    }
+                }
+            }
+        }
+        trace!("relay map rebuilt for channel={}: {} entries", channel_id, relay_map.len());
+    }
+
+    /// relay 핫패스: sender SSRC → (receiver_user_id, consumer_ssrc) 목록 조회
+    pub fn get_relay_targets(&self, sender_ssrc: u32) -> Vec<(String, u32)> {
+        self.ssrc_relay_map.read().unwrap()
+            .get(&sender_ssrc)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 특정 user 관련 consumer SSRC 모두 제거 (퇴장 시)
+    pub fn remove_consumer_ssrc_for_user(&self, user_id: &str) {
+        let mut map = self.consumer_ssrc.write().unwrap();
+        map.retain(|key, _| key.receiver != user_id && key.sender != user_id);
+        trace!("consumer SSRCs removed for user={}", user_id);
     }
 
     /// 좀비 피어 목록 반환 (last_seen 기준)

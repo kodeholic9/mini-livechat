@@ -10,4 +10,4 @@ pub mod user;
 pub use user::{BroadcastTx, User, UserHub};
 pub use channel::{Channel, ChannelHub, ChannelMode};
 pub use floor::{FloorControl, FloorControlState, FloorIndicator, FloorQueueEntry};
-pub use media_peer::{Endpoint, MediaPeer, MediaPeerHub, Track, TrackKind};
+pub use media_peer::{ConsumerSsrcKey, Endpoint, MediaPeer, MediaPeerHub, Track, TrackKind};

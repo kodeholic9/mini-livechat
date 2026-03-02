@@ -422,8 +422,10 @@ async fn handle_channel_leave(
         channel.remove_member(&user_id);
     }
 
-    // 2. Endpoint 제거
+    // 2. Endpoint 제거 + consumer SSRC 정리
     state.media_peer_hub.remove(&ufrag);
+    state.media_peer_hub.remove_consumer_ssrc_for_user(&user_id);
+    state.media_peer_hub.rebuild_relay_map(&payload.channel_id);
 
     session.current_channel = None;
     session.current_ssrc    = None;
@@ -679,22 +681,23 @@ async fn handle_renegotiate(
         }
     };
 
+    // Conference: consumer SSRC를 서버가 생성하여 SDP에 삽입
+    // relay 시 원본 SSRC → consumer SSRC로 rewrite됨
     let ssrc_map: Vec<SsrcMapping> = payload.mid_map.iter().filter_map(|entry| {
-        // entry.user_id의 Endpoint에서 해당 kind의 SSRC 조회
-        let endpoints = state.media_peer_hub.get_channel_endpoints(&payload.channel_id);
-        let peer_ep = endpoints.iter().find(|ep| ep.user_id == entry.user_id)?;
-        let tracks = peer_ep.tracks.read().unwrap();
         let target_kind = match entry.kind.as_str() {
             "audio" => crate::core::TrackKind::Audio,
             "video" => crate::core::TrackKind::Video,
             _       => return None,
         };
-        let ssrc = tracks.iter()
-            .find(|t| t.kind == target_kind)
-            .map(|t| t.ssrc)?;
-        trace!("[renego] mid={} -> user={} kind={} ssrc={}",
-            entry.mid, entry.user_id, entry.kind, ssrc);
-        Some(SsrcMapping { mid: entry.mid.clone(), ssrc })
+        // 서버가 consumer SSRC를 할당 (receiver=현재유저, sender=entry.user_id)
+        let consumer_ssrc = state.media_peer_hub.get_or_create_consumer_ssrc(
+            &user_id,
+            &entry.user_id,
+            target_kind,
+        );
+        trace!("[renego] mid={} -> receiver={} sender={} kind={} consumer_ssrc={}",
+            entry.mid, user_id, entry.user_id, entry.kind, consumer_ssrc);
+        Some(SsrcMapping { mid: entry.mid.clone(), ssrc: consumer_ssrc })
     }).collect();
 
     let sdp_answer = build_sdp_answer_for_renego(
@@ -705,6 +708,9 @@ async fn handle_renegotiate(
         existing_pwd,
         &ssrc_map,
     );
+
+    // relay map 재구축 (consumer SSRC 변경 반영)
+    state.media_peer_hub.rebuild_relay_map(&payload.channel_id);
 
     send(tx, make_packet(server::RENEGOTIATE_ACK, RenegotiateAckPayload {
         channel_id:  payload.channel_id,
@@ -797,6 +803,10 @@ async fn cleanup(session: &mut Session, state: &AppState) {
         }
 
         state.media_peer_hub.remove(&ufrag);
+
+        // Conference consumer SSRC 정리 + relay map 재구축
+        state.media_peer_hub.remove_consumer_ssrc_for_user(&user_id);
+        state.media_peer_hub.rebuild_relay_map(&channel_id);
 
         // Floor Control 정리 (holder면 Revoke, 대기열이면 제거)
         floor::on_user_disconnect(&user_id, &channel_id, &state.user_hub, &state.channel_hub).await;

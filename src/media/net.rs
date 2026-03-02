@@ -384,10 +384,63 @@ async fn relay_to_channel(
         return;
     }
 
+    // Conference 모드: SSRC rewrite 경로
+    // sender_ssrc를 기반으로 relay map에서 (receiver, consumer_ssrc) 매핑을 조회
+    let is_conference = channel_hub.get(channel_id)
+        .map(|ch| !ch.is_ptt())
+        .unwrap_or(false);
+
+    if is_conference && plaintext.len() >= 12 {
+        let sender_ssrc = u32::from_be_bytes([
+            plaintext[8], plaintext[9], plaintext[10], plaintext[11]
+        ]);
+        let relay_targets = peer_hub.get_relay_targets(sender_ssrc);
+
+        if !relay_targets.is_empty() {
+            // relay map이 있으면 SSRC rewrite 경로
+            for (receiver_user_id, consumer_ssrc) in &relay_targets {
+                let target = match peer_hub.get_channel_endpoints(channel_id)
+                    .into_iter()
+                    .find(|ep| ep.user_id == *receiver_user_id)
+                {
+                    Some(t) => t,
+                    None    => continue,
+                };
+
+                let addr = match target.get_address() {
+                    Some(a) => a,
+                    None    => { debug!("[relay-conf] user={} no addr", receiver_user_id); continue; }
+                };
+
+                // SSRC rewrite: RTP header offset 8~11
+                let mut rewritten = plaintext.to_vec();
+                rewritten[8..12].copy_from_slice(&consumer_ssrc.to_be_bytes());
+
+                let encrypted = {
+                    let mut ctx = target.outbound_srtp.lock().unwrap();
+                    match ctx.encrypt(&rewritten) {
+                        Ok(p)  => p,
+                        Err(e) => { warn!("[relay-conf] encrypt failed user={}: {}", receiver_user_id, e); continue; }
+                    }
+                };
+
+                if let Err(e) = socket.send_to(&encrypted, addr).await {
+                    warn!("[relay-conf] send failed user={}: {}", receiver_user_id, e);
+                } else {
+                    trace!("[relay-conf] {} bytes → user={} ssrc:{}→{}",
+                        encrypted.len(), receiver_user_id, sender_ssrc, consumer_ssrc);
+                }
+            }
+            return;
+        }
+        // relay map이 아직 없으면 (아직 re-nego 전) fallthrough to broadcast
+    }
+
+    // PTT 모드 또는 Conference에서 relay map 없는 경우: 기존 브로드캠스트 릴레이
     let targets = peer_hub.get_channel_endpoints(channel_id);
 
     for target in targets {
-        if target.ufrag == sender_ufrag { continue; } // 자기 자신 제외
+        if target.ufrag == sender_ufrag { continue; }
 
         let addr = match target.get_address() {
             Some(a) => a,

@@ -85,6 +85,38 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.20.6] - 2026-03-03
+
+### Conference SSRC Rewrite 기반 구축 — consumer SSRC 생성/매핑/relay rewrite
+
+#### core/media_peer.rs
+
+- `TrackKind`에 `Hash`, `Eq` derive 추가 (HashMap 키로 사용)
+- `ConsumerSsrcKey` 구조체 추가 — (receiver, sender, kind) 복합 키
+- `MediaPeerHub`에 `consumer_ssrc`, `ssrc_relay_map` 필드 추가
+- `get_or_create_consumer_ssrc()` — 서버가 consumer SSRC 할당/조회
+- `rebuild_relay_map()` — sender SSRC → Vec<(receiver, consumer_ssrc)> 역방향 맵
+- `get_relay_targets()` — relay 핫패스 O(1) 조회
+- `remove_consumer_ssrc_for_user()` — 퇴장 시 정리
+
+#### protocol/protocol.rs
+
+- `handle_renegotiate()` — 원본 producer SSRC 대신 consumer SSRC를 SDP answer에 삽입
+- `handle_renegotiate()` — answer 전송 후 `rebuild_relay_map()` 호출
+- `handle_channel_leave()` / `cleanup()` — consumer SSRC 정리 + relay map 재구축 추가
+
+#### media/net.rs
+
+- `relay_to_channel()` Conference SSRC rewrite 경로 추가
+  - sender SSRC로 relay map 조회 → 각 receiver에 consumer SSRC로 RTP header rewrite
+  - relay map 없으면 기존 브로드캠스트 fallback (PTT 호환)
+
+#### core.rs
+
+- `ConsumerSsrcKey` re-export 추가
+
+---
+
 ## [0.20.5] - 2026-03-02
 
 ### Conference 모드 지원 — CHANNEL_JOIN ACK에 mode 필드 추가
