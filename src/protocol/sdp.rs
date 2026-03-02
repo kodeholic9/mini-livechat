@@ -40,11 +40,15 @@ pub fn build_sdp_answer_with_ice(
     let local_ip     = crate::protocol::get_advertise_ip();
     let udp_port     = udp_port_arg;
 
-    // ICE/DTLS/방향/연결 라인은 서버 값으로 교체 — offer에서 제외
+    // ICE/DTLS/방향/연결/SSRC 라인은 서버 값으로 교체 — offer에서 제외
+    // a=ssrc, a=ssrc-group: SFU는 offer의 클라이언트 SSRC를 echo하면 안 됨
+    //   → Chrome BUNDLE demux 시 SSRC→mid 바인딩 충돌 유발 (RFC 8843 §9.2)
+    //   → sendonly m-line의 서버 SSRC는 build_sdp_answer_for_renego()에서 별도 삽입
     let skip_prefixes = [
         "a=ice-", "a=fingerprint", "a=setup", "a=candidate",
         "a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive",
         "a=rtcp-mux", "a=rtcp-rsize", "c=",
+        "a=ssrc", "a=ssrc-group",
     ];
 
     // --------------------------------------------------------------------
@@ -52,10 +56,11 @@ pub fn build_sdp_answer_with_ice(
     // MediaSection: m= 라인 + 코덱/속성 라인 목록 + 방향
     // --------------------------------------------------------------------
     struct MediaSection {
-        m_line:      String,       // 포트 교체 완료된 m= 라인
-        codec_lines: Vec<String>,  // ICE/DTLS/direction 제외한 나머지 a= 라인
-        mid:         String,       // BUNDLE 그룹용
-        direction:   String,       // offer의 방향: sendrecv|recvonly|sendonly|inactive
+        m_line:         String,       // 포트 교체 완료된 m= 라인
+        codec_lines:    Vec<String>,  // ICE/DTLS/direction/SSRC 제외한 나머지 a= 라인
+        mid:            String,       // BUNDLE 그룹용
+        direction:      String,       // offer의 방향: sendrecv|recvonly|sendonly|inactive
+        has_rtcp_rsize: bool,         // offer에 a=rtcp-rsize가 있었는지 (없으면 answer에서도 생략)
     }
 
     let mut sections: Vec<MediaSection> = Vec::new();
@@ -79,6 +84,7 @@ pub fn build_sdp_answer_with_ice(
                 codec_lines: Vec::new(),
                 mid: String::new(),
                 direction: "sendrecv".to_string(),  // 기본값 (offer에 명시 없으면 sendrecv)
+                has_rtcp_rsize: false,
             });
             continue;
         }
@@ -93,6 +99,9 @@ pub fn build_sdp_answer_with_ice(
         if line.starts_with("a=recvonly") { sec.direction = "recvonly".to_string(); continue; }
         if line.starts_with("a=sendonly") { sec.direction = "sendonly".to_string(); continue; }
         if line.starts_with("a=inactive") { sec.direction = "inactive".to_string(); continue; }
+
+        // a=rtcp-rsize 존재 여부 기록 (skip_prefixes로 제거되므로 여기서 캡처)
+        if line.starts_with("a=rtcp-rsize") { sec.has_rtcp_rsize = true; }
 
         if skip_prefixes.iter().any(|p| line.starts_with(p)) { continue; }
 
@@ -131,7 +140,10 @@ pub fn build_sdp_answer_with_ice(
         sdp.push_str(&format!("a=fingerprint:{}\r\n", fingerprint));
         sdp.push_str("a=setup:passive\r\n");
         sdp.push_str("a=rtcp-mux\r\n");
-        sdp.push_str("a=rtcp-rsize\r\n");
+        // a=rtcp-rsize는 offer에 있을 때만 미러링 — 불일치 시 Chrome demux 에러 유발
+        if sec.has_rtcp_rsize {
+            sdp.push_str("a=rtcp-rsize\r\n");
+        }
         // answer direction — offer direction을 반전
         //   offer sendrecv → answer sendrecv (기본 송수신)
         //   offer recvonly → answer sendonly (클라이언트 수신전용 → 서버 송신전용)
