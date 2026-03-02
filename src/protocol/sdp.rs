@@ -154,21 +154,35 @@ pub struct SsrcMapping {
 }
 
 /// re-negotiation용 SDP answer 생성
-/// mid_map으로 sendonly m-line에 해당 peer의 SSRC를 `a=ssrc:` 라인으로 삽입
+/// - 기존 ICE session을 유지해야 하므로 existing_ufrag/pwd를 그대로 사용
+/// - mid_map으로 sendonly m-line에 해당 peer의 SSRC를 `a=ssrc:` 라인으로 삽입
 pub fn build_sdp_answer_for_renego(
-    offer:        &str,
-    fingerprint:  &str,
-    udp_port:     u16,
-    ssrc_map:     &[SsrcMapping],  // mid → ssrc 매핑
-) -> (String, String, String) {
-    // 기본 answer 생성 (방향 반전 포함)
-    let (mut sdp, ufrag, pwd) = build_sdp_answer(offer, fingerprint, udp_port);
+    offer:          &str,
+    fingerprint:    &str,
+    udp_port:       u16,
+    existing_ufrag: &str,   // 초기 join 시 생성된 ufrag (ICE restart 방지)
+    existing_pwd:   &str,   // 초기 join 시 생성된 pwd
+    ssrc_map:       &[SsrcMapping],
+) -> String {
+    // 기본 answer 생성 후 ufrag/pwd를 기존 값으로 교체
+    let (mut sdp, new_ufrag, new_pwd) = build_sdp_answer(offer, fingerprint, udp_port);
+
+    // re-negotiation에서는 새 ufrag/pwd가 아닌 기존 ICE credential을 사용해야 함
+    // 새 ufrag를 넣으면 브라우저가 ICE restart로 인식해서 demux 실패
+    sdp = sdp.replace(
+        &format!("a=ice-ufrag:{}", new_ufrag),
+        &format!("a=ice-ufrag:{}", existing_ufrag),
+    );
+    sdp = sdp.replace(
+        &format!("a=ice-pwd:{}", new_pwd),
+        &format!("a=ice-pwd:{}", existing_pwd),
+    );
 
     // sendonly m-line에 a=ssrc: 라인 삽입
     // 전략: a=end-of-candidates 라인 직전에 mid에 해당하는 ssrc 라인 삽입
     // 이를 위해 완성된 SDP를 섹션별로 다시 파싱해서 조작
     if ssrc_map.is_empty() {
-        return (sdp, ufrag, pwd);
+        return sdp;
     }
 
     // 빠른 조회용 mid → ssrc HashMap
@@ -210,7 +224,7 @@ pub fn build_sdp_answer_for_renego(
     }
 
     sdp = result;
-    (sdp, ufrag, pwd)
+    sdp
 }
 
 /// 라우팅 테이블 기반 로컬 IP 자동 감지
@@ -540,7 +554,7 @@ mod tests {
             SsrcMapping { mid: "2".to_string(), ssrc: 111222 },
             SsrcMapping { mid: "3".to_string(), ssrc: 333444 },
         ];
-        let (sdp, _, _) = build_sdp_answer_for_renego(&offer, "sha-256 FF:00", 40000, &ssrc_map);
+        let sdp = build_sdp_answer_for_renego(&offer, "sha-256 FF:00", 40000, "testufrag", "testpwd", &ssrc_map);
         assert!(sdp.contains("a=ssrc:111222 cname:mini-livechat"), "audio ssrc should be inserted");
         assert!(sdp.contains("a=ssrc:333444 cname:mini-livechat"), "video ssrc should be inserted");
     }
@@ -548,25 +562,26 @@ mod tests {
     #[test]
     fn renego_ssrc_not_inserted_for_sendrecv() {
         let offer = make_renego_offer();
-        // mid:0, mid:1은 sendrecv — SSRC 백 매핑하더라도 sendrecv m-line에는 삽입 안 됨
         let ssrc_map = vec![
             SsrcMapping { mid: "0".to_string(), ssrc: 999999 },
         ];
-        let (sdp, _, _) = build_sdp_answer_for_renego(&offer, "sha-256 FF:00", 40000, &ssrc_map);
-        // mid:0에도 ssrc가 삽입될 수 있음 (서버가 매핑을 제공했으니까)
-        // 단, sendrecv m-line에 ssrc를 넣는 것은 문제 없음 (hint일 뿐)
+        let sdp = build_sdp_answer_for_renego(&offer, "sha-256 FF:00", 40000, "testufrag", "testpwd", &ssrc_map);
         assert!(sdp.contains("a=ssrc:999999"));
     }
 
     #[test]
     fn renego_empty_ssrc_map_no_change() {
         let offer = make_renego_offer();
-        let (sdp_base, _, _) = build_sdp_answer(&offer, "sha-256 FF:00", 40000);
-        let (sdp_renego, _, _) = build_sdp_answer_for_renego(&offer, "sha-256 FF:00", 40000, &[]);
-        // 빈 ssrc_map이면 기본 answer와 동일
-        // (ufrag/pwd가 랜덤이라 완전 같지는 않지만 ssrc 라인 없음 확인)
+        let sdp_renego = build_sdp_answer_for_renego(&offer, "sha-256 FF:00", 40000, "testufrag", "testpwd", &[]);
         assert!(!sdp_renego.contains("a=ssrc:"));
-        assert!(!sdp_base.contains("a=ssrc:"));
+    }
+
+    #[test]
+    fn renego_preserves_existing_ice_credentials() {
+        let offer = make_renego_offer();
+        let sdp = build_sdp_answer_for_renego(&offer, "sha-256 FF:00", 40000, "myUfrag123", "myPwd456", &[]);
+        assert!(sdp.contains("a=ice-ufrag:myUfrag123"), "should use existing ufrag");
+        assert!(sdp.contains("a=ice-pwd:myPwd456"), "should use existing pwd");
     }
 
     // ----- detect_local_ip -----

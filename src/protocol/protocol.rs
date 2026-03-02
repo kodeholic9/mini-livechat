@@ -664,6 +664,14 @@ async fn handle_renegotiate(
     // 각 mid에 대응하는 peer의 SSRC를 MediaPeerHub에서 조회
     use crate::protocol::sdp::{build_sdp_answer_for_renego, SsrcMapping};
 
+    // 기존 Endpoint의 ICE credential 조회 (re-negotiation에서는 ICE restart 방지)
+    let current_ufrag = session.current_ufrag.as_deref().unwrap_or("");
+    let existing_ep = state.media_peer_hub.get_by_ufrag(current_ufrag);
+    let (existing_ufrag, existing_pwd) = match &existing_ep {
+        Some(ep) => (ep.ufrag.as_str(), ep.ice_pwd.as_str()),
+        None     => ("", ""),
+    };
+
     let ssrc_map: Vec<SsrcMapping> = payload.mid_map.iter().filter_map(|entry| {
         // entry.user_id의 Endpoint에서 해당 kind의 SSRC 조회
         let endpoints = state.media_peer_hub.get_channel_endpoints(&payload.channel_id);
@@ -682,10 +690,12 @@ async fn handle_renegotiate(
         Some(SsrcMapping { mid: entry.mid.clone(), ssrc })
     }).collect();
 
-    let (sdp_answer, _new_ufrag, _new_pwd) = build_sdp_answer_for_renego(
+    let sdp_answer = build_sdp_answer_for_renego(
         &payload.sdp_offer,
         &state.server_cert.fingerprint,
         state.udp_port,
+        existing_ufrag,
+        existing_pwd,
         &ssrc_map,
     );
 
