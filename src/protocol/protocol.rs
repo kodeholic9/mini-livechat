@@ -317,6 +317,34 @@ async fn handle_channel_join(
     });
     state.user_hub.broadcast_to(&members, &peer_added_event, Some(&user_id)).await;
 
+    // 5c. 기존 멤버들의 peer_added를 신규 입장자에게 개별 전송
+    //     B 입장 시 A가 이미 있으면, B에게 A의 peer_added를 보내야 re-negotiation 트리거
+    let existing_endpoints = state.media_peer_hub.get_channel_endpoints(&payload.channel_id);
+    for existing_ep in &existing_endpoints {
+        if existing_ep.user_id == user_id { continue; }  // 본인 제외
+        let existing_tracks: Vec<TrackInfo> = existing_ep.tracks.read().unwrap()
+            .iter()
+            .map(|t| TrackInfo {
+                kind: match t.kind {
+                    crate::core::TrackKind::Audio => "audio".to_string(),
+                    crate::core::TrackKind::Video => "video".to_string(),
+                    crate::core::TrackKind::Data  => "data".to_string(),
+                },
+                ssrc: t.ssrc,
+            })
+            .collect();
+        let existing_peer_event = make_packet(server::CHANNEL_EVENT, ChannelEventPayload {
+            event:      "peer_added".to_string(),
+            channel_id: payload.channel_id.clone(),
+            data:       serde_json::to_value(PeerMediaInfo {
+                user_id: existing_ep.user_id.clone(),
+                tracks:  existing_tracks,
+            }).unwrap_or_default(),
+        });
+        let _ = tx.send(existing_peer_event).await;
+        trace!("[join] sent existing peer_added to {} for peer {}", user_id, existing_ep.user_id);
+    }
+
     // 6. Floor Taken 상태라면 신규 입장자에게 FLOOR_TAKEN 전송
     //    MutexGuard가 await를 걸치면 Send 불만족 → 동기 블록에서 패킷 문자열만 추출,
     //    Guard는 블록 끝에서 drop되고 await는 그 다음에 실행됨
