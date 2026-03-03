@@ -269,7 +269,19 @@ async fn handle_channel_join(
 
     // 2. Endpoint 등록 (server_ufrag 주키, ice_pwd 포함)
     let ep = state.media_peer_hub.insert(&ep_ufrag, &ep_pwd, &user_id, &payload.channel_id);
-    ep.add_track(payload.ssrc, crate::core::TrackKind::Audio);
+    // tracks 배열이 있으면 전부 등록, 없으면 ssrc로 audio 1개 (하위 호환)
+    if payload.tracks.is_empty() {
+        ep.add_track(payload.ssrc, crate::core::TrackKind::Audio);
+    } else {
+        for t in &payload.tracks {
+            let kind = match t.kind.as_str() {
+                "video" => crate::core::TrackKind::Video,
+                _       => crate::core::TrackKind::Audio,
+            };
+            ep.add_track(t.ssrc, kind);
+            trace!("[join] registered track kind={} ssrc={} for user={}", t.kind, t.ssrc, user_id);
+        }
+    }
 
     session.current_channel = Some(payload.channel_id.clone());
     session.current_ssrc    = Some(payload.ssrc);

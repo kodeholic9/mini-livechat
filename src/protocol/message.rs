@@ -41,6 +41,10 @@ pub struct ChannelJoinPayload {
     pub ssrc:       u32,
     pub ufrag:      String,
     pub sdp_offer:  Option<String>,
+    /// 클라이언트 트랙 목록 [{kind, ssrc}] — peer_added 이벤트에 video 포함용
+    /// 없으면 ssrc 필드로 audio 1개만 등록 (하위 호환)
+    #[serde(default)]
+    pub tracks:     Vec<TrackInfo>,
 }
 
 /// op: CHANNEL_LEAVE (12)
